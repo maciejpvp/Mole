@@ -1,0 +1,31 @@
+services:
+  mole-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: mole-server:latest
+    container_name: mole-server
+    restart: unless-stopped
+
+    ports:
+      - "${CONTROL_PORT:-9000}:9000/tcp"
+      - "${PUBLIC_PORT:-8000}:8000/tcp"
+      - "${PUBLIC_PORT:-8000}:8000/udp"
+
+    command:
+      - "--secret=${MOLE_SECRET}"
+      - "--control-port=9000"
+      - "--public-port=8000"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9000 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
