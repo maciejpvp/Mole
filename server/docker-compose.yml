@@ -1,9 +1,6 @@
 services:
   mole-server:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    image: mole-server:latest
+    image: ${MOLE_IMAGE:-mole-server:latest}
     container_name: mole-server
     restart: unless-stopped
 
