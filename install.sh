@@ -3,20 +3,12 @@
 # ==============================================================================
 # Mole Server - Automated Installation Script
 # ==============================================================================
-#
-# Best practices applied:
-# - 'set -euo pipefail' ensures the script exits on errors, undefined vars, or pipe failures.
-# - Prompts have safe defaults.
-# - Generates cryptographically secure secrets automatically if omitted.
-# - File permissions are strictly scoped (chmod 600 on .env).
-# - Universal Docker installation via get.docker.com.
-# ==============================================================================
 
 set -euo pipefail
 
 # --- CONFIGURATION ---
 INSTALL_DIR="/opt/mole-server"
-COMPOSE_URL="https://raw.githubusercontent.com/maciejpvp/Mole/main/server/docker-compose.yml" # <-- Update this URL
+COMPOSE_URL="https://raw.githubusercontent.com/maciejpvp/Mole/main/server/docker-compose.yml"
 
 # --- HELPER FUNCTIONS ---
 info()  { echo -e "\e[32m[INFO]\e[0m $1"; }
@@ -35,7 +27,6 @@ fi
 # --- DOCKER SETUP ---
 if ! command -v docker >/dev/null 2>&1; then
   info "Docker is not installed. Fetching official installation script..."
-  # The official convenience script supports almost all major Linux distributions
   curl -fsSL https://get.docker.com | sh
   info "Docker installed successfully."
   systemctl enable --now docker
@@ -50,7 +41,6 @@ elif command -v docker-compose >/dev/null 2>&1; then
   DOCKER_COMPOSE_CMD="docker-compose"
 else
   warn "Docker Compose plugin not found. Installing via package manager..."
-  # Fallback installation for compose plugin if missing
   curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
   apt-get update -y && apt-get install -y docker-compose-plugin || yum install -y docker-compose-plugin
   DOCKER_COMPOSE_CMD="docker compose"
@@ -65,27 +55,32 @@ cd "$INSTALL_DIR"
 echo ""
 info "--- Mole Server Configuration ---"
 
+# Pre-initialize variables so set -u doesn't trigger when piped or on EOF
+INPUT_SECRET=""
+INPUT_IMAGE=""
+INPUT_CONTROL=""
+INPUT_PUBLIC=""
+
 # 1. MOLE_SECRET
-# Generate a strong 32-byte hex fallback. Checks for openssl, falls back to urandom.
 DEFAULT_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)
-read -r -p "Enter MOLE_SECRET [Press enter to auto-generate a secure token]: " INPUT_SECRET
+read -r -p "Enter MOLE_SECRET [Press enter to auto-generate a secure token]: " INPUT_SECRET </dev/tty || true
 MOLE_SECRET="${INPUT_SECRET:-$DEFAULT_SECRET}"
 
 # 2. MOLE_IMAGE
-read -r -p "Enter MOLE_IMAGE [maciekpvp/mole-server:latest]: " INPUT_IMAGE
+read -r -p "Enter MOLE_IMAGE [maciekpvp/mole-server:latest]: " INPUT_IMAGE </dev/tty || true
 MOLE_IMAGE="${INPUT_IMAGE:-maciekpvp/mole-server:latest}"
 
 # 3. CONTROL_PORT
-read -r -p "Enter CONTROL_PORT [9000]: " INPUT_CONTROL
+read -r -p "Enter CONTROL_PORT [9000]: " INPUT_CONTROL </dev/tty || true
 CONTROL_PORT="${INPUT_CONTROL:-9000}"
 
 # 4. PUBLIC_PORT
-read -r -p "Enter PUBLIC_PORT [8000]: " INPUT_PUBLIC
+read -r -p "Enter PUBLIC_PORT [8000]: " INPUT_PUBLIC </dev/tty || true
 PUBLIC_PORT="${INPUT_PUBLIC:-8000}"
 
 # --- GENERATE .env ---
 info "Generating .env file..."
-cat > .env <<EOF
+cat <<EOF > .env
 # Mole Server Environment Configuration
 # Generated on $(date)
 
@@ -106,11 +101,6 @@ info ".env file secured (chmod 600)."
 
 # --- FETCH DOCKER COMPOSE ---
 info "Fetching docker-compose.yml..."
-if [ "$COMPOSE_URL" == "https://raw.githubusercontent.com/maciejpvp/Mole/main/server/docker-compose.yml" ]; then
-    read -r -p "Enter raw GitHub URL for your docker-compose.yml: " REAL_URL
-    COMPOSE_URL="${REAL_URL}"
-fi
-
 curl -fSL "$COMPOSE_URL" -o docker-compose.yml || error "Failed to download docker-compose.yml from $COMPOSE_URL"
 
 # --- DEPLOY ---
