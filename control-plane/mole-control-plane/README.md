@@ -49,6 +49,16 @@ make test
 
 ## Tunnel provisioning
 
+Retrieve the authenticated account, current plan limits and usage, and all of
+its tunnels:
+
+```http
+GET /api/v1/user/me
+Authorization: Bearer <access_token>
+```
+
+Tunnel connection tokens are deliberately never returned by this endpoint.
+
 Create a user session first, then create a tunnel with its bearer token:
 
 ```http

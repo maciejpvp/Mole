@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -54,6 +56,44 @@ type User struct {
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	Plan     string `json:"plan"`
+}
+
+// Profile is the authenticated user's account snapshot. It intentionally
+// excludes credentials, session tokens, and tunnel connection tokens.
+type Profile struct {
+	User
+	CreatedAt   time.Time  `json:"created_at"`
+	LastLoginAt *time.Time `json:"last_login_at"`
+	Limits      Limits     `json:"limits"`
+	Usage       Usage      `json:"usage"`
+	Tunnels     []Tunnel   `json:"tunnels"`
+}
+
+type Limits struct {
+	MaxActiveTunnels     *int64 `json:"max_active_tunnels"`
+	MonthlyMinutes       *int64 `json:"monthly_minutes"`
+	MonthlyTransferBytes *int64 `json:"monthly_transfer_bytes"`
+}
+
+type Usage struct {
+	PeriodStartedAt      time.Time  `json:"period_started_at"`
+	MonthlyMinutesUsed   int64      `json:"monthly_minutes_used"`
+	MonthlyTransferBytes int64      `json:"monthly_transfer_bytes_used"`
+	LimitReachedAt       *time.Time `json:"limit_reached_at"`
+}
+
+type Tunnel struct {
+	ID                         string     `json:"id"`
+	Protocol                   string     `json:"proto"`
+	InternalAddress            string     `json:"internal_address"`
+	OutboundPort               int        `json:"outbound_port"`
+	ServerAddress              string     `json:"server_address"`
+	Status                     string     `json:"status"`
+	StartedAt                  *time.Time `json:"started_at"`
+	StoppedAt                  *time.Time `json:"stopped_at"`
+	CurrentPeriodMinutes       int64      `json:"current_period_minutes"`
+	CurrentPeriodTransferBytes int64      `json:"current_period_transfer_bytes"`
+	CreatedAt                  time.Time  `json:"created_at"`
 }
 
 type Authentication struct {
@@ -212,6 +252,83 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 	}
 	_, _ = s.db.ExecContext(ctx, "UPDATE sessions SET last_used_at = CURRENT_TIMESTAMP WHERE token_hash = $1", tokenHash[:])
 	return account, nil
+}
+
+// Profile returns all non-sensitive account, quota, usage, and tunnel data
+// for an authenticated user.
+func (s *Service) Profile(ctx context.Context, userID string) (Profile, error) {
+	var (
+		profile Profile
+		limits  Limits
+		usage   Usage
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT users.id, users.username, users.email, plans.name,
+			users.created_at, users.last_login_at,
+			plans.max_active_tunnels, plans.monthly_minutes, plans.monthly_transfer_bytes,
+			users.usage_period_started_at, users.monthly_minutes_used,
+			users.monthly_transfer_bytes_used, users.usage_limit_reached_at
+		FROM users
+		JOIN plans ON plans.id = users.plan_id
+		WHERE users.id = $1`, userID).Scan(
+		&profile.ID, &profile.Username, &profile.Email, &profile.Plan,
+		&profile.CreatedAt, &profile.LastLoginAt,
+		&limits.MaxActiveTunnels, &limits.MonthlyMinutes, &limits.MonthlyTransferBytes,
+		&usage.PeriodStartedAt, &usage.MonthlyMinutesUsed,
+		&usage.MonthlyTransferBytes, &usage.LimitReachedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Profile{}, ErrUnauthenticated
+	}
+	if err != nil {
+		return Profile{}, fmt.Errorf("get user profile: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, proto, host(inbound_ip), inbound_port, outbound_port, server_address,
+			status, started_at, stopped_at, current_period_minutes,
+			current_period_transfer_bytes, created_at
+		FROM tunnels
+		WHERE user_id = $1
+		ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return Profile{}, fmt.Errorf("list user tunnels: %w", err)
+	}
+	defer rows.Close()
+
+	profile.Tunnels = make([]Tunnel, 0)
+	for rows.Next() {
+		var (
+			entry        Tunnel
+			protocol     int16
+			internalIP   string
+			internalPort int
+		)
+		if err := rows.Scan(
+			&entry.ID, &protocol, &internalIP, &internalPort, &entry.OutboundPort, &entry.ServerAddress,
+			&entry.Status, &entry.StartedAt, &entry.StoppedAt, &entry.CurrentPeriodMinutes,
+			&entry.CurrentPeriodTransferBytes, &entry.CreatedAt,
+		); err != nil {
+			return Profile{}, fmt.Errorf("read user tunnel: %w", err)
+		}
+		switch protocol {
+		case 6:
+			entry.Protocol = "tcp"
+		case 17:
+			entry.Protocol = "udp"
+		default:
+			return Profile{}, fmt.Errorf("read user tunnel: unsupported protocol")
+		}
+		entry.InternalAddress = net.JoinHostPort(internalIP, strconv.Itoa(internalPort))
+		profile.Tunnels = append(profile.Tunnels, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return Profile{}, fmt.Errorf("list user tunnels: %w", err)
+	}
+
+	profile.Limits = limits
+	profile.Usage = usage
+	return profile, nil
 }
 
 func (s *Service) createSession(ctx context.Context, tx *sql.Tx, account User) (Authentication, error) {

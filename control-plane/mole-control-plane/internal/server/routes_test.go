@@ -9,12 +9,9 @@ import (
 
 func TestHandler(t *testing.T) {
 	s := &Server{}
-	server := httptest.NewServer(http.HandlerFunc(s.HelloWorldHandler))
-	defer server.Close()
-	resp, err := http.Get(server.URL)
-	if err != nil {
-		t.Fatalf("error making request to server. Err: %v", err)
-	}
+	recorder := httptest.NewRecorder()
+	s.HelloWorldHandler(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	resp := recorder.Result()
 	defer resp.Body.Close()
 	// Assertions
 	if resp.StatusCode != http.StatusOK {
@@ -27,5 +24,16 @@ func TestHandler(t *testing.T) {
 	}
 	if expected != string(body) {
 		t.Errorf("expected response body to be %v; got %v", expected, string(body))
+	}
+}
+
+func TestCurrentUserRouteRequiresAuthentication(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).RegisterRoutes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/user/me", nil))
+	resp := recorder.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected status unauthorized; got %v", resp.Status)
 	}
 }
