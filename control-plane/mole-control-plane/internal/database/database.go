@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +13,9 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/joho/godotenv/autoload"
 )
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
 // Service represents a service that interacts with a database.
 type Service interface {
@@ -48,10 +52,67 @@ func New() Service {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if err := runMigrations(db); err != nil {
+		_ = db.Close()
+		log.Fatal(err)
+	}
 	dbInstance = &service{
 		db: db,
 	}
 	return dbInstance
+}
+
+func runMigrations(db *sql.DB) error {
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`); err != nil {
+		return fmt.Errorf("create schema migrations table: %w", err)
+	}
+
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		return fmt.Errorf("read migrations: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		version := entry.Name()
+		var applied bool
+		if err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)", version).Scan(&applied); err != nil {
+			return fmt.Errorf("check migration %s: %w", version, err)
+		}
+		if applied {
+			continue
+		}
+
+		migration, err := migrationFiles.ReadFile("migrations/" + version)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", version, err)
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", version, err)
+		}
+		if _, err := tx.Exec(string(migration)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("run migration %s: %w", version, err)
+		}
+		if _, err := tx.Exec("INSERT INTO schema_migrations (version) VALUES ($1)", version); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record migration %s: %w", version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", version, err)
+		}
+	}
+
+	return nil
 }
 
 // Health checks the health of the database connection by pinging the database.
