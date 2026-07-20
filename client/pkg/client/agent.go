@@ -8,7 +8,11 @@ import (
 )
 
 const (
-	signalNewConn = byte(0x01)
+	signalNewConn  = byte(0x01)
+	signalStartUDP = byte(0x02)
+	roleControl    = byte(0x00)
+	roleTCPLeg     = byte(0x01)
+	roleUDPBridge  = byte(0x02)
 
 	backoffBase = 1 * time.Second
 	backoffMax  = 30 * time.Second
@@ -26,19 +30,19 @@ type Agent struct {
 	serverAddr  string // e.g. "1.2.3.4:9000"
 	localTarget string // e.g. "127.0.0.1:5173"
 	localProto  string // "tcp" or "udp"
-	secret      string
+	token       string
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 }
 
-func New(serverAddr, localTarget, localProto, secret string) *Agent {
+func New(serverAddr, localTarget, localProto, token string) *Agent {
 	return &Agent{
 		serverAddr:  serverAddr,
 		localTarget: localTarget,
 		localProto:  localProto,
-		secret:      secret,
+		token:       token,
 		stopCh:      make(chan struct{}),
 	}
 }
@@ -66,8 +70,8 @@ func (a *Agent) Run() {
 		logDebug("[agent] control connection established: local=%s remote=%s", conn.LocalAddr(), conn.RemoteAddr())
 		backoff = backoffBase
 
-		if err := a.sendSecret(conn); err != nil {
-			logDebug("[agent] secret handshake failed: %v — reconnecting", err)
+		if err := a.sendHandshake(conn, roleControl); err != nil {
+			logDebug("[agent] token handshake failed: %v — reconnecting", err)
 			conn.Close()
 			continue
 		}
@@ -91,16 +95,19 @@ func (a *Agent) Wait() {
 	a.wg.Wait()
 }
 
-// sendSecret sends the shared secret to the server as part of the control
-// handshake. Wire format: 4-byte big-endian length prefix + secret bytes.
-func (a *Agent) sendSecret(conn net.Conn) error {
-	secretBytes := []byte(a.secret)
+// sendHandshake identifies the tunnel and connection role. Wire format:
+// 4-byte token length, token bytes, then a one-byte connection role.
+func (a *Agent) sendHandshake(conn net.Conn, role byte) error {
+	tokenBytes := []byte(a.token)
 	hdr := make([]byte, 4)
-	putUint32BE(hdr, uint32(len(secretBytes)))
+	putUint32BE(hdr, uint32(len(tokenBytes)))
 	if _, err := conn.Write(hdr); err != nil {
 		return err
 	}
-	_, err := conn.Write(secretBytes)
+	if _, err := conn.Write(tokenBytes); err != nil {
+		return err
+	}
+	_, err := conn.Write([]byte{role})
 	return err
 }
 
@@ -128,7 +135,10 @@ func (a *Agent) readSignals(control net.Conn) {
 		switch buf[0] {
 		case signalNewConn:
 			logDebug("[agent] server signalled new %s session", a.localProto)
-			a.dispatchBridge()
+			a.dispatchTCPBridge()
+		case signalStartUDP:
+			logDebug("[agent] server requested UDP bridge")
+			a.dispatchUDPBridge()
 		default:
 			// Unknown signal bytes are silently discarded — keeps the relay blind.
 			logDebug("[agent] unknown signal byte 0x%02x — ignored", buf[0])
@@ -136,7 +146,7 @@ func (a *Agent) readSignals(control net.Conn) {
 	}
 }
 
-func (a *Agent) dispatchBridge() {
+func (a *Agent) dispatchTCPBridge() {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -145,17 +155,32 @@ func (a *Agent) dispatchBridge() {
 			logDebug("[agent] tunnel dial error: %v", err)
 			return
 		}
+		if err := a.sendHandshake(tunnelConn, roleTCPLeg); err != nil {
+			logDebug("[agent] TCP tunnel handshake error: %v", err)
+			tunnelConn.Close()
+			return
+		}
 		logDebug("[agent] tunnel leg opened: local=%s remote=%s", tunnelConn.LocalAddr(), tunnelConn.RemoteAddr())
 
-		switch a.localProto {
-		case "tcp":
-			BridgeTCP(tunnelConn, a.localTarget)
-		case "udp":
-			BridgeUDP(tunnelConn, a.localTarget, a.stopCh)
-		default:
-			logDebug("[agent] unsupported protocol: %q", a.localProto)
-			tunnelConn.Close()
+		BridgeTCP(tunnelConn, a.localTarget)
+	}()
+}
+
+func (a *Agent) dispatchUDPBridge() {
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		tunnelConn, err := net.DialTimeout("tcp", a.serverAddr, 10*time.Second)
+		if err != nil {
+			logDebug("[agent] UDP bridge dial error: %v", err)
+			return
 		}
+		if err := a.sendHandshake(tunnelConn, roleUDPBridge); err != nil {
+			logDebug("[agent] UDP bridge handshake error: %v", err)
+			tunnelConn.Close()
+			return
+		}
+		BridgeUDP(tunnelConn, a.localTarget, a.stopCh)
 	}()
 }
 

@@ -4,15 +4,14 @@ services:
     container_name: mole-server
     restart: unless-stopped
 
-    ports:
-      - "${CONTROL_PORT:-9000}:9000/tcp"
-      - "${PUBLIC_PORT:-8000}:8000/tcp"
-      - "${PUBLIC_PORT:-8000}:8000/udp"
+    env_file:
+      - .env
 
-    command:
-      - "--secret=${MOLE_SECRET}"
-      - "--control-port=9000"
-      - "--public-port=8000"
+    ports:
+      - "${MOLE_CONTROL_PORT:-9000}:${MOLE_CONTROL_PORT:-9000}/tcp"
+      - "${MOLE_MANAGEMENT_PORT:-9001}:${MOLE_MANAGEMENT_PORT:-9001}/tcp"
+      - "${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}:${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}/tcp"
+      - "${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}:${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}/udp"
 
     logging:
       driver: json-file

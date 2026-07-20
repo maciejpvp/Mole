@@ -10,12 +10,19 @@ import (
 	_ "github.com/joho/godotenv/autoload"
 
 	"mole-control-plane/internal/database"
+	"mole-control-plane/internal/tunnel"
+	"mole-control-plane/internal/user"
 )
 
 type Server struct {
 	port int
 
 	db database.Service
+
+	users   *user.Service
+	tunnels *tunnel.Service
+
+	tunnelSetupErr error
 }
 
 func NewServer() *http.Server {
@@ -25,6 +32,10 @@ func NewServer() *http.Server {
 
 		db: database.New(),
 	}
+	NewServer.users = user.NewService(NewServer.db.DB())
+	provisioner, err := tunnel.NewHTTPProvisionerFromEnv()
+	NewServer.tunnels = tunnel.NewService(NewServer.db.DB(), provisioner)
+	NewServer.tunnelSetupErr = err
 
 	// Declare Server config
 	server := &http.Server{

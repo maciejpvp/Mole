@@ -1,85 +1,136 @@
 package orchestrator
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
-
-	"Mole/server/pkg/relay"
 )
 
 const (
-	dialTimeout   = 10 * time.Second
-	signalNewConn = byte(0x01)
+	roleControl = byte(0x00)
+	roleTCPLeg  = byte(0x01)
+	roleUDP     = byte(0x02)
+
+	signalNewTCP    = byte(0x01)
+	signalStartUDP  = byte(0x02)
+	handshakeMaxLen = 512
+	dialTimeout     = 10 * time.Second
 )
 
+// Config configures one relay instance. Public ports are allocated only from
+// the inclusive PortMin/PortMax range.
+type Config struct {
+	ControlPort int
+	PortMin     int
+	PortMax     int
+	PublicHost  string
+}
+
+type ProvisionRequest struct {
+	TunnelID                  string
+	UserID                    string
+	Protocol                  string
+	Token                     string
+	MonthlyMinutesLimit       *int64
+	MonthlyTransferBytesLimit *int64
+	MonthlyMinutesUsed        int64
+	MonthlyTransferBytesUsed  int64
+}
+
+type ProvisionResponse struct {
+	OutboundPort int    `json:"outbound_port"`
+	PublicHost   string `json:"public_host"`
+	ControlPort  int    `json:"control_port"`
+}
+
+type UsageUpdate struct {
+	TunnelID      string `json:"tunnel_id"`
+	ActiveMinutes int64  `json:"active_minutes"`
+	TransferBytes int64  `json:"transfer_bytes"`
+}
+
+// Engine is the in-memory tunnel registry for one relay instance.
 type Engine struct {
-	controlPort int
-	publicPort  int
-	secret      string
+	cfg Config
 
-	pendingTunnels chan net.Conn
+	mu       sync.RWMutex
+	tunnels  map[string]*tunnel
+	tokens   map[[sha256.Size]byte]*tunnel
+	users    map[string]*userUsage
+	usedPort map[int]struct{}
 
-	controlConn net.Conn
-	controlMu   sync.RWMutex
-
-	stopCh   chan struct{}
-	stopOnce sync.Once
+	controlLn net.Listener
+	stopCh    chan struct{}
+	stopOnce  sync.Once
 }
 
-// New creates a new Engine bound to the given ports.
-// secret is the shared token clients must present before being registered.
-func New(controlPort, publicPort int, secret string) *Engine {
-	return &Engine{
-		controlPort:    controlPort,
-		publicPort:     publicPort,
-		secret:         secret,
-		pendingTunnels: make(chan net.Conn, 64),
-		stopCh:         make(chan struct{}),
+type userUsage struct {
+	monthlyMinutesLimit       *int64
+	monthlyTransferBytesLimit *int64
+	minutesUsed               int64
+	transferUsed              int64
+	tunnels                   map[string]*tunnel
+}
+
+type tunnel struct {
+	engine *Engine
+
+	id       string
+	userID   string
+	protocol string
+	token    [sha256.Size]byte
+	port     int
+
+	mu                     sync.Mutex
+	stopped                bool
+	tcpListener            net.Listener
+	udpListener            *net.UDPConn
+	control                net.Conn
+	controlWriteMu         sync.Mutex
+	tcpLegs                chan net.Conn
+	sessions               map[net.Conn]struct{}
+	udpBridge              net.Conn
+	udpBridgeWriteMu       sync.Mutex
+	activeSince            time.Time
+	activeRemainderSeconds int64
+	unsyncedMinutes        int64
+	unsyncedTransferBytes  int64
+}
+
+func New(cfg Config) (*Engine, error) {
+	if cfg.ControlPort < 1 || cfg.ControlPort > 65535 || cfg.PortMin < 1 || cfg.PortMax > 65535 || cfg.PortMin > cfg.PortMax || strings.TrimSpace(cfg.PublicHost) == "" {
+		return nil, errors.New("invalid relay configuration")
 	}
+	return &Engine{
+		cfg:      cfg,
+		tunnels:  make(map[string]*tunnel),
+		tokens:   make(map[[sha256.Size]byte]*tunnel),
+		users:    make(map[string]*userUsage),
+		usedPort: make(map[int]struct{}),
+		stopCh:   make(chan struct{}),
+	}, nil
 }
 
-// Run starts all listeners and blocks until Stop is called.
+// Run starts the fixed control listener. Public listeners are created by
+// Provision and removed by Deprovision.
 func (e *Engine) Run() error {
-	controlAddr := fmt.Sprintf(":%d", e.controlPort)
-	publicTCPAddr := fmt.Sprintf(":%d", e.publicPort)
-	publicUDPAddr := fmt.Sprintf(":%d", e.publicPort)
-
-	controlLn, err := net.Listen("tcp", controlAddr)
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", e.cfg.ControlPort))
 	if err != nil {
 		return fmt.Errorf("control listener: %w", err)
 	}
-	defer controlLn.Close()
-	log.Printf("[orchestrator] control listener up on %s", controlAddr)
+	e.mu.Lock()
+	e.controlLn = ln
+	e.mu.Unlock()
+	log.Printf("[orchestrator] control listener up on %s", ln.Addr())
 
-	publicTCPLn, err := net.Listen("tcp", publicTCPAddr)
-	if err != nil {
-		return fmt.Errorf("public TCP listener: %w", err)
-	}
-	defer publicTCPLn.Close()
-	log.Printf("[orchestrator] public TCP listener up on %s", publicTCPAddr)
-
-	publicUDPConn, err := net.ListenPacket("udp", publicUDPAddr)
-	if err != nil {
-		return fmt.Errorf("public UDP listener: %w", err)
-	}
-	defer publicUDPConn.Close()
-	log.Printf("[orchestrator] public UDP listener up on %s", publicUDPAddr)
-
-	// Shut down all listeners when Stop is called.
-	go func() {
-		<-e.stopCh
-		controlLn.Close()
-		publicTCPLn.Close()
-		publicUDPConn.Close()
-	}()
-
-	go e.acceptControl(controlLn)
-	go e.acceptPublicTCP(publicTCPLn)
-	go e.handlePublicUDP(publicUDPConn.(*net.UDPConn))
-
+	go e.acceptControl(ln)
 	<-e.stopCh
 	return nil
 }
@@ -87,7 +138,95 @@ func (e *Engine) Run() error {
 func (e *Engine) Stop() {
 	e.stopOnce.Do(func() {
 		close(e.stopCh)
+		e.mu.Lock()
+		if e.controlLn != nil {
+			_ = e.controlLn.Close()
+		}
+		tunnels := make([]*tunnel, 0, len(e.tunnels))
+		for _, item := range e.tunnels {
+			tunnels = append(tunnels, item)
+		}
+		e.mu.Unlock()
+		for _, item := range tunnels {
+			item.closeRuntime()
+		}
 	})
+}
+
+func (e *Engine) Provision(request ProvisionRequest) (ProvisionResponse, error) {
+	if request.TunnelID == "" || request.UserID == "" || request.Token == "" || (request.Protocol != "tcp" && request.Protocol != "udp") || request.MonthlyMinutesUsed < 0 || request.MonthlyTransferBytesUsed < 0 {
+		return ProvisionResponse{}, errors.New("invalid tunnel provision request")
+	}
+	tokenHash := sha256.Sum256([]byte(request.Token))
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, exists := e.tunnels[request.TunnelID]; exists {
+		return ProvisionResponse{}, errors.New("tunnel already exists")
+	}
+	if _, exists := e.tokens[tokenHash]; exists {
+		return ProvisionResponse{}, errors.New("tunnel token already exists")
+	}
+
+	item := &tunnel{
+		engine:   e,
+		id:       request.TunnelID,
+		userID:   request.UserID,
+		protocol: request.Protocol,
+		token:    tokenHash,
+		tcpLegs:  make(chan net.Conn, 64),
+		sessions: make(map[net.Conn]struct{}),
+	}
+	port, err := e.bindPublicListenerLocked(item)
+	if err != nil {
+		return ProvisionResponse{}, err
+	}
+	item.port = port
+	e.tunnels[item.id] = item
+	e.tokens[tokenHash] = item
+
+	usage := e.users[request.UserID]
+	if usage == nil {
+		usage = &userUsage{
+			minutesUsed:  request.MonthlyMinutesUsed,
+			transferUsed: request.MonthlyTransferBytesUsed,
+			tunnels:      make(map[string]*tunnel),
+		}
+		e.users[request.UserID] = usage
+	}
+	usage.monthlyMinutesLimit = copyLimit(request.MonthlyMinutesLimit)
+	usage.monthlyTransferBytesLimit = copyLimit(request.MonthlyTransferBytesLimit)
+	usage.tunnels[item.id] = item
+
+	if item.protocol == "tcp" {
+		go item.acceptTCP()
+	} else {
+		go item.relayUDP()
+	}
+	log.Printf("[orchestrator] provisioned %s tunnel %s on public port %d", item.protocol, item.id, item.port)
+	return ProvisionResponse{OutboundPort: item.port, PublicHost: e.cfg.PublicHost, ControlPort: e.cfg.ControlPort}, nil
+}
+
+func (e *Engine) Deprovision(tunnelID string) error {
+	e.mu.Lock()
+	item, exists := e.tunnels[tunnelID]
+	if !exists {
+		e.mu.Unlock()
+		return nil
+	}
+	delete(e.tunnels, tunnelID)
+	delete(e.tokens, item.token)
+	delete(e.usedPort, item.port)
+	if usage := e.users[item.userID]; usage != nil {
+		delete(usage.tunnels, tunnelID)
+		if len(usage.tunnels) == 0 {
+			delete(e.users, item.userID)
+		}
+	}
+	e.mu.Unlock()
+	item.closeRuntime()
+	log.Printf("[orchestrator] deprovisioned tunnel %s", tunnelID)
+	return nil
 }
 
 func (e *Engine) acceptControl(ln net.Listener) {
@@ -102,278 +241,550 @@ func (e *Engine) acceptControl(ln net.Listener) {
 				continue
 			}
 		}
-
-		e.controlMu.RLock()
-		hasControl := e.controlConn != nil
-		e.controlMu.RUnlock()
-
-		if !hasControl {
-			e.registerControl(conn)
-		} else {
-			// This is a tunnel leg — queue it for an awaiting public connection.
-			log.Printf("[orchestrator] tunnel leg registered: remote=%s", conn.RemoteAddr())
-			select {
-			case e.pendingTunnels <- conn:
-			case <-e.stopCh:
-				conn.Close()
-			}
-		}
+		go e.registerConnection(conn)
 	}
 }
 
-// registerControl reads the client's secret handshake, validates it, and
-// then stores the control connection and starts monitoring it.
-// If the secret is wrong the connection is rejected immediately.
-// If the client disconnects, the control connection is cleared so the next
-// dial is treated as a fresh registration.
-func (e *Engine) registerControl(conn net.Conn) {
-	// --- secret handshake ---
-	// Wire format: 4-byte big-endian length prefix followed by the secret bytes.
-	hdr := make([]byte, 4)
-	if _, err := readFull(conn, hdr); err != nil {
-		log.Printf("[orchestrator] handshake read error from %s: %v", conn.RemoteAddr(), err)
-		conn.Close()
+func (e *Engine) registerConnection(conn net.Conn) {
+	item, role, err := e.authenticate(conn)
+	if err != nil {
+		_ = conn.Close()
 		return
 	}
-	secretLen := int(getUint32(hdr))
-	if secretLen > 4096 {
-		log.Printf("[orchestrator] handshake secret too long (%d) from %s — rejected", secretLen, conn.RemoteAddr())
-		conn.Close()
+	if item.isStopped() {
+		_ = conn.Close()
 		return
 	}
-	secretBuf := make([]byte, secretLen)
-	if _, err := readFull(conn, secretBuf); err != nil {
-		log.Printf("[orchestrator] handshake secret read error from %s: %v", conn.RemoteAddr(), err)
-		conn.Close()
-		return
-	}
-	if string(secretBuf) != e.secret {
-		log.Printf("[orchestrator] invalid secret from %s — rejected", conn.RemoteAddr())
-		conn.Close()
-		return
-	}
-	// --- end handshake ---
 
-	e.controlMu.Lock()
-	e.controlConn = conn
-	e.controlMu.Unlock()
+	switch role {
+	case roleControl:
+		item.setControl(conn)
+		if item.protocol == "udp" && item.signal(signalStartUDP) != nil {
+			item.clearControl(conn)
+			_ = conn.Close()
+		}
+	case roleTCPLeg:
+		if item.protocol != "tcp" {
+			_ = conn.Close()
+			return
+		}
+		select {
+		case item.tcpLegs <- conn:
+		case <-e.stopCh:
+			_ = conn.Close()
+		}
+	case roleUDP:
+		if item.protocol != "udp" {
+			_ = conn.Close()
+			return
+		}
+		item.setUDPBridge(conn)
+	default:
+		_ = conn.Close()
+	}
+}
 
-	log.Printf("[orchestrator] client registered: remote=%s", conn.RemoteAddr())
+func (e *Engine) authenticate(conn net.Conn) (*tunnel, byte, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	// Monitor for control connection close.
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			_, err := conn.Read(buf)
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return nil, 0, err
+	}
+	length := int(uint32(header[0])<<24 | uint32(header[1])<<16 | uint32(header[2])<<8 | uint32(header[3]))
+	if length < 1 || length > handshakeMaxLen {
+		return nil, 0, errors.New("invalid token length")
+	}
+	token := make([]byte, length)
+	if _, err := io.ReadFull(conn, token); err != nil {
+		return nil, 0, err
+	}
+	role := make([]byte, 1)
+	if _, err := io.ReadFull(conn, role); err != nil {
+		return nil, 0, err
+	}
+	hash := sha256.Sum256(token)
+
+	e.mu.RLock()
+	item := e.tokens[hash]
+	e.mu.RUnlock()
+	if item == nil || subtle.ConstantTimeCompare(hash[:], item.token[:]) != 1 {
+		return nil, 0, errors.New("invalid token")
+	}
+	return item, role[0], nil
+}
+
+func (e *Engine) bindPublicListenerLocked(item *tunnel) (int, error) {
+	for port := e.cfg.PortMin; port <= e.cfg.PortMax; port++ {
+		if _, used := e.usedPort[port]; used {
+			continue
+		}
+		if item.protocol == "tcp" {
+			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
-				log.Printf("[orchestrator] control connection lost: %v", err)
-				e.controlMu.Lock()
-				if e.controlConn == conn {
-					e.controlConn = nil
-				}
-				e.controlMu.Unlock()
-				conn.Close()
-				return
-			}
-			// The client may send keep-alive bytes; we discard them.
-		}
-	}()
-}
-
-func (e *Engine) acceptPublicTCP(ln net.Listener) {
-	for {
-		publicConn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-e.stopCh:
-				return
-			default:
-				log.Printf("[orchestrator] public TCP accept error: %v", err)
 				continue
 			}
+			item.tcpListener = ln
+		} else {
+			conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
+			if err != nil {
+				continue
+			}
+			item.udpListener = conn
 		}
+		e.usedPort[port] = struct{}{}
+		return port, nil
+	}
+	return 0, errors.New("no public ports available")
+}
 
-		log.Printf("[orchestrator] public TCP connection: remote=%s", publicConn.RemoteAddr())
-		go e.bridgePublicTCP(publicConn)
+func (t *tunnel) acceptTCP() {
+	for {
+		conn, err := t.tcpListener.Accept()
+		if err != nil {
+			if !t.isStopped() {
+				log.Printf("[orchestrator] tunnel %s accept error: %v", t.id, err)
+			}
+			return
+		}
+		go t.bridgeTCP(conn)
 	}
 }
 
-func (e *Engine) bridgePublicTCP(publicConn net.Conn) {
-	defer func() {
-		if publicConn != nil {
-			publicConn.Close()
-		}
-	}()
-
-	if err := e.signal(signalNewConn); err != nil {
-		log.Printf("[orchestrator] failed to signal client: %v", err)
+func (t *tunnel) bridgeTCP(publicConn net.Conn) {
+	defer publicConn.Close()
+	if t.signal(signalNewTCP) != nil {
 		return
 	}
 	select {
-	case tunnelConn := <-e.pendingTunnels:
-		log.Printf("[orchestrator] splicing public=%s <-> tunnel=%s",
-			publicConn.RemoteAddr(), tunnelConn.RemoteAddr())
-		pc := publicConn
-		publicConn = nil // prevent defer double-close
-		relay.TCP(pc, tunnelConn)
-
+	case tunnelConn := <-t.tcpLegs:
+		t.addSession(publicConn, tunnelConn)
+		defer t.removeSession(publicConn, tunnelConn)
+		relayTCP(publicConn, tunnelConn, func(bytes int64) { t.engine.recordBytes(t.id, bytes) })
 	case <-time.After(dialTimeout):
-		log.Printf("[orchestrator] timed out waiting for tunnel leg for %s", publicConn.RemoteAddr())
-
-	case <-e.stopCh:
+	case <-t.engine.stopCh:
 	}
 }
 
-// handlePublicUDP forwards UDP datagrams between the public internet and the
-// control connection using the framed wire protocol from relay/udp.go.
-func (e *Engine) handlePublicUDP(conn *net.UDPConn) {
-	udpRelay := relay.NewUDPRelay(conn)
-
-	inbound := udpRelay.RunInbound()
-
-	// Outbound: frames coming from the client over TCP control connection.
-	// We read them in a goroutine and push them into a channel for RunOutbound.
-	outboundCh := make(chan []byte, 256)
-	udpRelay.RunOutbound(outboundCh)
-
-	// Forward inbound UDP frames to the client over the control connection.
-	go func() {
-		for frame := range inbound {
-			e.controlMu.RLock()
-			cc := e.controlConn
-			e.controlMu.RUnlock()
-
-			if cc == nil {
-				log.Printf("[orchestrator] UDP frame dropped — no client connected")
-				continue
+func (t *tunnel) relayUDP() {
+	buffer := make([]byte, 65535)
+	for {
+		n, remote, err := t.udpListener.ReadFromUDP(buffer)
+		if err != nil {
+			if !t.isStopped() {
+				log.Printf("[orchestrator] UDP tunnel %s read error: %v", t.id, err)
 			}
-			if _, err := cc.Write(frame); err != nil && !isClosedErr(err) {
-				log.Printf("[orchestrator] UDP forward to client error: %v", err)
-			}
+			return
 		}
-	}()
+		payload := append([]byte(nil), buffer[:n]...)
+		bridge := t.getUDPBridge()
+		if bridge == nil {
+			continue
+		}
+		if err := t.writeUDPFrame(bridge, remote.String(), payload); err != nil {
+			t.clearUDPBridge(bridge)
+			_ = bridge.Close()
+			continue
+		}
+		t.engine.recordBytes(t.id, int64(n))
+	}
+}
 
-	// Read UDP reply frames from the client over the control connection and
-	// push them to the outbound channel.
+func (t *tunnel) setControl(conn net.Conn) {
+	t.mu.Lock()
+	previous := t.control
+	t.control = conn
+	t.activeSince = time.Now()
+	t.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
 	go func() {
-		defer close(outboundCh)
-		hdr := make([]byte, 4)
+		buffer := make([]byte, 1)
 		for {
-			e.controlMu.RLock()
-			cc := e.controlConn
-			e.controlMu.RUnlock()
-
-			if cc == nil {
-				// Back-off and retry until a client connects.
-				select {
-				case <-e.stopCh:
-					return
-				case <-time.After(500 * time.Millisecond):
-					continue
-				}
-			}
-
-			// Read the 4-byte addr-length prefix.
-			if _, err := readFull(cc, hdr); err != nil {
-				if !isClosedErr(err) {
-					log.Printf("[orchestrator] UDP reply read error: %v", err)
-				}
-				continue
-			}
-			addrLen := int(getUint32(hdr))
-			addrBuf := make([]byte, addrLen)
-			if _, err := readFull(cc, addrBuf); err != nil {
-				log.Printf("[orchestrator] UDP reply addr read error: %v", err)
-				continue
-			}
-			if _, err := readFull(cc, hdr); err != nil {
-				log.Printf("[orchestrator] UDP reply payload-len read error: %v", err)
-				continue
-			}
-			payLen := int(getUint32(hdr))
-			payBuf := make([]byte, payLen)
-			if _, err := readFull(cc, payBuf); err != nil {
-				log.Printf("[orchestrator] UDP reply payload read error: %v", err)
-				continue
-			}
-
-			frame := encodeFrame(string(addrBuf), payBuf)
-			select {
-			case outboundCh <- frame:
-			case <-e.stopCh:
+			if _, err := conn.Read(buffer); err != nil {
+				t.clearControl(conn)
 				return
 			}
 		}
 	}()
-
-	<-e.stopCh
-	udpRelay.Stop()
 }
 
-// signal writes a single-byte command to the active control connection.
-func (e *Engine) signal(cmd byte) error {
-	e.controlMu.RLock()
-	cc := e.controlConn
-	e.controlMu.RUnlock()
-
-	if cc == nil {
-		return fmt.Errorf("no client connected")
+func (t *tunnel) clearControl(conn net.Conn) {
+	t.mu.Lock()
+	minutes := int64(0)
+	if t.control == conn {
+		minutes = t.flushActiveDurationLocked(time.Now())
+		t.control = nil
+		t.activeSince = time.Time{}
+		if t.udpBridge != nil {
+			_ = t.udpBridge.Close()
+			t.udpBridge = nil
+		}
 	}
-	_, err := cc.Write([]byte{cmd})
+	t.mu.Unlock()
+	t.engine.recordMinutes(t.userID, minutes)
+}
+
+func (t *tunnel) signal(signal byte) error {
+	t.mu.Lock()
+	conn := t.control
+	stopped := t.stopped
+	t.mu.Unlock()
+	if stopped || conn == nil {
+		return errors.New("tunnel client is not connected")
+	}
+	t.controlWriteMu.Lock()
+	defer t.controlWriteMu.Unlock()
+	_, err := conn.Write([]byte{signal})
 	return err
 }
 
-// isClosedErr returns true for the "use of closed network connection" sentinel.
-func isClosedErr(err error) bool {
-	if err == nil {
-		return false
+func (t *tunnel) setUDPBridge(conn net.Conn) {
+	t.mu.Lock()
+	previous := t.udpBridge
+	t.udpBridge = conn
+	t.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
 	}
-	const closed = "use of closed network connection"
-	s := err.Error()
-	for i := 0; i <= len(s)-len(closed); i++ {
-		if s[i:i+len(closed)] == closed {
-			return true
-		}
-	}
-	return false
+	go t.readUDPBridge(conn)
 }
 
-// readFull reads exactly len(buf) bytes from conn, returning an error if
-// fewer bytes are available before EOF.
-func readFull(conn net.Conn, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := conn.Read(buf[total:])
-		total += n
+func (t *tunnel) getUDPBridge() net.Conn {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.udpBridge
+}
+
+func (t *tunnel) clearUDPBridge(conn net.Conn) {
+	t.mu.Lock()
+	if t.udpBridge == conn {
+		t.udpBridge = nil
+	}
+	t.mu.Unlock()
+}
+
+func (t *tunnel) readUDPBridge(conn net.Conn) {
+	for {
+		address, payload, err := readUDPFrame(conn)
 		if err != nil {
-			return total, err
+			t.clearUDPBridge(conn)
+			_ = conn.Close()
+			return
+		}
+		remote, err := net.ResolveUDPAddr("udp", address)
+		if err != nil {
+			continue
+		}
+		t.mu.Lock()
+		listener := t.udpListener
+		stopped := t.stopped
+		t.mu.Unlock()
+		if stopped || listener == nil {
+			return
+		}
+		if _, err := listener.WriteToUDP(payload, remote); err == nil {
+			t.engine.recordBytes(t.id, int64(len(payload)))
 		}
 	}
-	return total, nil
 }
 
-// encodeFrame mirrors relay.encodeFrame to avoid a circular import.
-func encodeFrame(addr string, payload []byte) []byte {
-	addrBytes := []byte(addr)
-	buf := make([]byte, 4+len(addrBytes)+4+len(payload))
-	i := 0
-	putUint32(buf[i:], uint32(len(addrBytes)))
-	i += 4
-	copy(buf[i:], addrBytes)
-	i += len(addrBytes)
-	putUint32(buf[i:], uint32(len(payload)))
-	i += 4
-	copy(buf[i:], payload)
-	return buf
+func (t *tunnel) writeUDPFrame(conn net.Conn, address string, payload []byte) error {
+	frame := encodeUDPFrame(address, payload)
+	t.udpBridgeWriteMu.Lock()
+	defer t.udpBridgeWriteMu.Unlock()
+	_, err := conn.Write(frame)
+	return err
 }
 
-func putUint32(b []byte, v uint32) {
-	b[0] = byte(v >> 24)
-	b[1] = byte(v >> 16)
-	b[2] = byte(v >> 8)
-	b[3] = byte(v)
+func (t *tunnel) isStopped() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.stopped
 }
 
-func getUint32(b []byte) uint32 {
-	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+func (t *tunnel) closeRuntime() {
+	t.mu.Lock()
+	minutes := t.flushActiveDurationLocked(time.Now())
+	t.activeSince = time.Time{}
+	t.stopped = true
+	listener := t.tcpListener
+	udpListener := t.udpListener
+	control := t.control
+	udpBridge := t.udpBridge
+	sessions := make([]net.Conn, 0, len(t.sessions))
+	for session := range t.sessions {
+		sessions = append(sessions, session)
+	}
+	t.tcpListener = nil
+	t.udpListener = nil
+	t.control = nil
+	t.udpBridge = nil
+	t.sessions = make(map[net.Conn]struct{})
+	t.mu.Unlock()
+	t.engine.recordMinutes(t.userID, minutes)
+	if listener != nil {
+		_ = listener.Close()
+	}
+	if udpListener != nil {
+		_ = udpListener.Close()
+	}
+	if control != nil {
+		_ = control.Close()
+	}
+	if udpBridge != nil {
+		_ = udpBridge.Close()
+	}
+	for _, session := range sessions {
+		_ = session.Close()
+	}
+}
+
+func (t *tunnel) addSession(connections ...net.Conn) {
+	t.mu.Lock()
+	for _, connection := range connections {
+		t.sessions[connection] = struct{}{}
+	}
+	t.mu.Unlock()
+}
+
+func (t *tunnel) removeSession(connections ...net.Conn) {
+	t.mu.Lock()
+	for _, connection := range connections {
+		delete(t.sessions, connection)
+	}
+	t.mu.Unlock()
+}
+
+func (e *Engine) recordBytes(tunnelID string, bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	e.mu.Lock()
+	item := e.tunnels[tunnelID]
+	if item == nil {
+		e.mu.Unlock()
+		return
+	}
+	usage := e.users[item.userID]
+	item.mu.Lock()
+	item.unsyncedTransferBytes += bytes
+	item.mu.Unlock()
+	usage.transferUsed += bytes
+	stops := e.enforceUserLimitLocked(usage)
+	e.mu.Unlock()
+	for _, stopped := range stops {
+		stopped.closeRuntime()
+	}
+}
+
+// CollectUsage prepares an idempotency-free delta batch. Call AcknowledgeUsage
+// only after the control plane accepts the complete batch.
+func (e *Engine) CollectUsage(now time.Time) []UsageUpdate {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var updates []UsageUpdate
+	var toStop []*tunnel
+	for _, item := range e.tunnels {
+		item.mu.Lock()
+		minutesAdded := item.flushActiveDurationLocked(now)
+		minutes := item.unsyncedMinutes
+		bytes := item.unsyncedTransferBytes
+		item.mu.Unlock()
+		if usage := e.users[item.userID]; usage != nil {
+			usage.minutesUsed += minutesAdded
+		}
+		if minutes != 0 || bytes != 0 {
+			updates = append(updates, UsageUpdate{TunnelID: item.id, ActiveMinutes: minutes, TransferBytes: bytes})
+		}
+	}
+	for _, usage := range e.users {
+		toStop = append(toStop, e.enforceUserLimitLocked(usage)...)
+	}
+	go func(items []*tunnel) {
+		for _, item := range items {
+			item.closeRuntime()
+		}
+	}(toStop)
+	return updates
+}
+
+func (e *Engine) AcknowledgeUsage(updates []UsageUpdate) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	for _, update := range updates {
+		item := e.tunnels[update.TunnelID]
+		if item == nil {
+			continue
+		}
+		item.mu.Lock()
+		item.unsyncedMinutes -= min(item.unsyncedMinutes, update.ActiveMinutes)
+		item.unsyncedTransferBytes -= min(item.unsyncedTransferBytes, update.TransferBytes)
+		item.mu.Unlock()
+	}
+}
+
+func (e *Engine) StopTunnels(tunnelIDs []string) {
+	for _, tunnelID := range tunnelIDs {
+		e.mu.RLock()
+		item := e.tunnels[tunnelID]
+		e.mu.RUnlock()
+		if item != nil {
+			item.closeRuntime()
+		}
+	}
+}
+
+func (e *Engine) enforceUserLimitLocked(usage *userUsage) []*tunnel {
+	minutesExceeded := usage.monthlyMinutesLimit != nil && usage.minutesUsed >= *usage.monthlyMinutesLimit
+	transferExceeded := usage.monthlyTransferBytesLimit != nil && usage.transferUsed >= *usage.monthlyTransferBytesLimit
+	if !minutesExceeded && !transferExceeded {
+		return nil
+	}
+	items := make([]*tunnel, 0, len(usage.tunnels))
+	for _, item := range usage.tunnels {
+		item.mu.Lock()
+		if !item.stopped {
+			item.stopped = true
+			items = append(items, item)
+		}
+		item.mu.Unlock()
+	}
+	return items
+}
+
+func (t *tunnel) flushActiveDurationLocked(now time.Time) int64 {
+	if t.activeSince.IsZero() {
+		return 0
+	}
+	seconds := int64(now.Sub(t.activeSince) / time.Second)
+	if seconds <= 0 {
+		return 0
+	}
+	t.activeSince = t.activeSince.Add(time.Duration(seconds) * time.Second)
+	t.activeRemainderSeconds += seconds
+	wholeMinutes := t.activeRemainderSeconds / 60
+	if wholeMinutes == 0 {
+		return 0
+	}
+	t.activeRemainderSeconds %= 60
+	t.unsyncedMinutes += wholeMinutes
+	return wholeMinutes
+}
+
+func (e *Engine) recordMinutes(userID string, minutes int64) {
+	if minutes == 0 {
+		return
+	}
+	e.mu.Lock()
+	usage := e.users[userID]
+	if usage != nil {
+		usage.minutesUsed += minutes
+	}
+	var stops []*tunnel
+	if usage != nil {
+		stops = e.enforceUserLimitLocked(usage)
+	}
+	e.mu.Unlock()
+	for _, stopped := range stops {
+		stopped.closeRuntime()
+	}
+}
+
+func copyLimit(limit *int64) *int64 {
+	if limit == nil {
+		return nil
+	}
+	value := *limit
+	return &value
+}
+
+func relayTCP(left, right net.Conn, record func(int64)) {
+	defer left.Close()
+	defer right.Close()
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			_ = left.Close()
+			_ = right.Close()
+		})
+	}
+	done := make(chan struct{}, 2)
+	copyOne := func(destination, source net.Conn) {
+		_, err := io.Copy(destination, meteredReader{reader: source, record: record})
+		if err != nil {
+			closeAll()
+		} else if tcp, ok := destination.(*net.TCPConn); ok {
+			_ = tcp.CloseWrite()
+		}
+		done <- struct{}{}
+	}
+	go copyOne(right, left)
+	go copyOne(left, right)
+	<-done
+	<-done
+}
+
+type meteredReader struct {
+	reader io.Reader
+	record func(int64)
+}
+
+func (r meteredReader) Read(destination []byte) (int, error) {
+	n, err := r.reader.Read(destination)
+	if n > 0 {
+		r.record(int64(n))
+	}
+	return n, err
+}
+
+func encodeUDPFrame(address string, payload []byte) []byte {
+	addressBytes := []byte(address)
+	frame := make([]byte, 4+len(addressBytes)+4+len(payload))
+	putUint32(frame[:4], uint32(len(addressBytes)))
+	copy(frame[4:], addressBytes)
+	payloadOffset := 4 + len(addressBytes)
+	putUint32(frame[payloadOffset:payloadOffset+4], uint32(len(payload)))
+	copy(frame[payloadOffset+4:], payload)
+	return frame
+}
+
+func readUDPFrame(conn net.Conn) (string, []byte, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return "", nil, err
+	}
+	addressLength := int(readUint32(header))
+	if addressLength < 1 || addressLength > 256 {
+		return "", nil, errors.New("invalid UDP address length")
+	}
+	address := make([]byte, addressLength)
+	if _, err := io.ReadFull(conn, address); err != nil {
+		return "", nil, err
+	}
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return "", nil, err
+	}
+	payloadLength := int(readUint32(header))
+	if payloadLength < 0 || payloadLength > 65535 {
+		return "", nil, errors.New("invalid UDP payload length")
+	}
+	payload := make([]byte, payloadLength)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		return "", nil, err
+	}
+	return string(address), payload, nil
+}
+
+func putUint32(destination []byte, value uint32) {
+	destination[0] = byte(value >> 24)
+	destination[1] = byte(value >> 16)
+	destination[2] = byte(value >> 8)
+	destination[3] = byte(value)
+}
+
+func readUint32(source []byte) uint32 {
+	return uint32(source[0])<<24 | uint32(source[1])<<16 | uint32(source[2])<<8 | uint32(source[3])
 }

@@ -25,6 +25,13 @@ func (s *Server) RegisterRoutes() http.Handler {
 	r.Get("/", s.HelloWorldHandler)
 
 	r.Get("/health", s.healthHandler)
+	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Post("/register", s.registerHandler)
+		r.Post("/login", s.loginHandler)
+	})
+	r.Post("/api/v1/tunnels", s.createTunnelHandler)
+	r.Post("/api/v1/tunnels/connect", s.connectTunnelHandler)
+	r.Post("/internal/v1/tunnels/usage", s.syncTunnelUsageHandler)
 
 	return r
 }

@@ -13,7 +13,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /out/mole-server /mole-server
 
 EXPOSE 9000
-EXPOSE 8000
+EXPOSE 9001
+EXPOSE 10000-10100
 
 ENTRYPOINT ["/mole-server"]
-CMD ["--control-port=9000", "--public-port=8000"]

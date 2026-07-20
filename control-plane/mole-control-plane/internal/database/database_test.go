@@ -151,10 +151,10 @@ func TestTunnelsMigration(t *testing.T) {
 	srv := New().(*service)
 	createTestUser(t, srv, "test-user")
 
-	var tunnelID int64
+	var tunnelID string
 	err := srv.db.QueryRow(`
-		INSERT INTO tunnels (user_id, outbound_port, inbound_ip, inbound_port)
-		VALUES ('test-user', 8080, '127.0.0.1', 3000)
+		INSERT INTO tunnels (id, user_id, outbound_port, inbound_ip, inbound_port, server_address, connection_token_hash)
+		VALUES ('test-tunnel', 'test-user', 8080, '127.0.0.1', 3000, 'relay.example.test:9000', decode('00', 'hex'))
 		RETURNING id`).Scan(&tunnelID)
 	if err != nil {
 		t.Fatalf("insert tunnel: %v", err)
@@ -175,7 +175,7 @@ func TestTunnelsMigration(t *testing.T) {
 		currentPeriodTransferBytes int64
 	)
 	if err := srv.db.QueryRow(`
-		SELECT user_id, outbound_port, inbound_ip::TEXT, inbound_port, status,
+		SELECT user_id, outbound_port, host(inbound_ip), inbound_port, status,
 			current_period_minutes, current_period_transfer_bytes
 		FROM tunnels
 		WHERE id = $1`, tunnelID).Scan(
@@ -230,7 +230,10 @@ func createTestUser(t *testing.T, srv *service, userID string) {
 	if err := srv.db.QueryRow("SELECT id FROM plans WHERE name = 'free'").Scan(&planID); err != nil {
 		t.Fatalf("get free plan: %v", err)
 	}
-	if _, err := srv.db.Exec("INSERT INTO users (id, plan_id) VALUES ($1, $2)", userID, planID); err != nil {
+	if _, err := srv.db.Exec(`
+		INSERT INTO users (id, username, email, password_hash, plan_id)
+		VALUES ($1, $2, $3, '$2a$12$LQv3c1yqrv9IXNVzXuD.Tu3W6Lxsa0YQzM8b0e4ujdMZD8ydphbOm', $4)`,
+		userID, userID, userID+"@example.com", planID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	t.Cleanup(func() {

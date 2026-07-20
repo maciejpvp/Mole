@@ -23,15 +23,24 @@ VALUES
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
     plan_id BIGINT NOT NULL REFERENCES plans (id) ON DELETE RESTRICT,
     usage_period_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     monthly_minutes_used BIGINT NOT NULL DEFAULT 0,
     monthly_transfer_bytes_used BIGINT NOT NULL DEFAULT 0,
     usage_limit_reached_at TIMESTAMPTZ,
+    failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    last_login_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT users_monthly_minutes_used_nonnegative CHECK (monthly_minutes_used >= 0),
-    CONSTRAINT users_monthly_transfer_bytes_used_nonnegative CHECK (monthly_transfer_bytes_used >= 0)
+    CONSTRAINT users_monthly_transfer_bytes_used_nonnegative CHECK (monthly_transfer_bytes_used >= 0),
+    CONSTRAINT users_failed_login_attempts_nonnegative CHECK (failed_login_attempts >= 0),
+    CONSTRAINT users_username_format CHECK (username ~ '^[a-z0-9][a-z0-9_-]{2,31}$'),
+    CONSTRAINT users_email_normalized CHECK (email = lower(email))
 );
 
 CREATE INDEX users_plan_id_idx ON users (plan_id);
@@ -40,13 +49,27 @@ COMMENT ON COLUMN users.id IS 'Stable identifier supplied by the authentication 
 COMMENT ON COLUMN users.usage_period_started_at IS 'Start of the billing/usage period represented by the monthly counters.';
 COMMENT ON COLUMN users.usage_limit_reached_at IS 'When the current plan limit was first exceeded; NULL when within limits.';
 
-CREATE TABLE tunnels (
+CREATE TABLE sessions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    token_hash BYTEA NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMPTZ
+);
+
+CREATE INDEX sessions_user_id_idx ON sessions (user_id);
+CREATE INDEX sessions_expires_at_idx ON sessions (expires_at);
+
+CREATE TABLE tunnels (
+    id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     proto smallint NOT NULL DEFAULT 6, -- 6 = TCP, 17 = UDP
     outbound_port INTEGER NOT NULL,
     inbound_ip INET NOT NULL,
     inbound_port INTEGER NOT NULL,
+    server_address TEXT NOT NULL,
+    connection_token_hash BYTEA NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'stopped',
     started_at TIMESTAMPTZ,
     stopped_at TIMESTAMPTZ,
@@ -57,6 +80,7 @@ CREATE TABLE tunnels (
     CONSTRAINT tunnels_outbound_port_valid CHECK (outbound_port BETWEEN 1 AND 65535),
     CONSTRAINT tunnels_inbound_port_valid CHECK (inbound_port BETWEEN 1 AND 65535),
     CONSTRAINT tunnels_status_valid CHECK (status IN ('active', 'stopped')),
+    CONSTRAINT tunnels_proto_valid CHECK (proto IN (6, 17)),
     CONSTRAINT tunnels_current_period_minutes_nonnegative CHECK (current_period_minutes >= 0),
     CONSTRAINT tunnels_current_period_transfer_bytes_nonnegative CHECK (current_period_transfer_bytes >= 0)
 );

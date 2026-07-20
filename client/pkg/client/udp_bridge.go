@@ -54,7 +54,10 @@ func BridgeUDP(tunnelConn net.Conn, localTarget string, stopCh <-chan struct{}) 
 		return
 	}
 
-	var sessions sync.Map // map[string]*udpSession
+	var (
+		sessions sync.Map // map[string]*udpSession
+		writeMu  sync.Mutex
+	)
 
 	// Start GC for idle sessions.
 	gcStop := make(chan struct{})
@@ -114,7 +117,7 @@ func BridgeUDP(tunnelConn net.Conn, localTarget string, stopCh <-chan struct{}) 
 			logDebug("[udp_bridge] new session: remote=%s → local=%s", remoteAddrStr, localTarget)
 
 			// Read replies from the local service and forward them back.
-			go readLocalUDP(lconn, remoteAddrStr, tunnelConn, stopCh)
+			go readLocalUDP(lconn, remoteAddrStr, tunnelConn, stopCh, &writeMu)
 		}
 
 		sess := sessVal.(*udpSession)
@@ -128,7 +131,7 @@ func BridgeUDP(tunnelConn net.Conn, localTarget string, stopCh <-chan struct{}) 
 
 // readLocalUDP reads datagrams from localConn and forwards them as framed
 // packets back through tunnelConn to the VPS server.
-func readLocalUDP(localConn *net.UDPConn, remoteAddrStr string, tunnelConn net.Conn, stopCh <-chan struct{}) {
+func readLocalUDP(localConn *net.UDPConn, remoteAddrStr string, tunnelConn net.Conn, stopCh <-chan struct{}, writeMu *sync.Mutex) {
 	defer localConn.Close()
 
 	buf := make([]byte, udpMaxPacketSize)
@@ -147,10 +150,13 @@ func readLocalUDP(localConn *net.UDPConn, remoteAddrStr string, tunnelConn net.C
 		}
 
 		frame := encodeUDPFrame(remoteAddrStr, buf[:n])
+		writeMu.Lock()
 		if _, err := tunnelConn.Write(frame); err != nil && !isConnClosed(err) {
+			writeMu.Unlock()
 			logDebug("[udp_bridge] write to tunnel (remote=%s): %v", remoteAddrStr, err)
 			return
 		}
+		writeMu.Unlock()
 	}
 }
 

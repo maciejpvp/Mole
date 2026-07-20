@@ -1,7 +1,11 @@
 services:
   psql_bp:
-    image: postgres:latest
+    # Pin the major version: `latest` can perform an incompatible PostgreSQL
+    # major upgrade against the existing named volume.
+    image: postgres:17
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       POSTGRES_DB: ${BLUEPRINT_DB_DATABASE}
       POSTGRES_USER: ${BLUEPRINT_DB_USERNAME}
