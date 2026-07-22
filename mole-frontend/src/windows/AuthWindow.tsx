@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ImGuiButton, ImGuiInputString } from '../components/imgui'
+import { useAuthSession } from '../auth/authSessionContext'
 import { useUser, userQueryKey } from '../hooks/useUser'
 import { login, register } from '../lib/auth'
-import { getAccessToken, setAccessToken } from '../lib/api'
 
 function errorMessage(error: unknown) {
   if (typeof error === 'object' && error && 'response' in error) {
@@ -28,7 +28,7 @@ const emptyForm: AuthFormData = {
 export function AuthWindow() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [formData, setFormData] = useState<AuthFormData>(emptyForm)
-  const [accessToken, setSessionAccessToken] = useState(getAccessToken)
+  const { accessToken, setSessionAccessToken } = useAuthSession()
   const queryClient = useQueryClient()
 
   const registerMode = mode === 'register'
@@ -41,7 +41,6 @@ export function AuthWindow() {
       ? register(formData)
       : login({ identifier: formData.username, password: formData.password }),
     onSuccess: (authentication) => {
-      setAccessToken(authentication.access_token)
       setSessionAccessToken(authentication.access_token)
       void queryClient.invalidateQueries({ queryKey: userQueryKey })
     },
@@ -61,7 +60,6 @@ export function AuthWindow() {
   }
 
   const logout = () => {
-    setAccessToken(null)
     setSessionAccessToken(null)
     queryClient.removeQueries({ queryKey: userQueryKey })
   }

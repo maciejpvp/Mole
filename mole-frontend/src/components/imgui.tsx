@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { Rnd } from 'react-rnd'
 
 // react-rnd requires pixels. ImGuiDesktop converts its normalized layout into
@@ -11,6 +11,23 @@ export type WindowPixelLayout = {
   zIndex: number
 }
 
+export type NormalizedWindowSize = {
+  width: number
+  height: number
+}
+
+type ImGuiWindowControls = {
+  setSize: (size: NormalizedWindowSize) => void
+}
+
+const ImGuiWindowContext = createContext<ImGuiWindowControls | null>(null)
+
+export function useImGuiWindow() {
+  const controls = useContext(ImGuiWindowContext)
+  if (!controls) throw new Error('useImGuiWindow must be used inside ImGuiWindowContainer')
+  return controls
+}
+
 type ImGuiWindowContainerProps = {
   title: string
   layout: WindowPixelLayout
@@ -19,6 +36,8 @@ type ImGuiWindowContainerProps = {
   onClose: () => void
   onLayoutChange: (layout: Omit<WindowPixelLayout, 'zIndex'>) => void
   showCloseBtn?: boolean
+  isResizable?: boolean
+  onProgrammaticResize: (size: NormalizedWindowSize) => void
 }
 
 export function ImGuiWindowContainer({
@@ -29,17 +48,23 @@ export function ImGuiWindowContainer({
   onClose,
   onLayoutChange,
   showCloseBtn = false,
+  isResizable = true,
+  onProgrammaticResize,
 }: ImGuiWindowContainerProps) {
   const [collapsed, setCollapsed] = useState(false)
+  const resizeHandler = useRef(onProgrammaticResize)
+  resizeHandler.current = onProgrammaticResize
+  const setSize = useCallback((size: NormalizedWindowSize) => resizeHandler.current(size), [])
+  const controls = useMemo(() => ({ setSize }), [setSize])
 
   return (
     <Rnd
       bounds="parent"
       position={{ x: layout.x, y: layout.y }}
       size={{ width: layout.width, height: collapsed ? 28 : layout.height }}
-      minWidth={220}
-      minHeight={collapsed ? 28 : 132}
-      enableResizing={!collapsed}
+      minWidth={isResizable && !collapsed ? 220 : 0}
+      minHeight={isResizable && !collapsed ? 132 : 28}
+      enableResizing={isResizable && !collapsed}
       dragHandleClassName="imgui-window-titlebar"
       onMouseDown={onFocus}
       onDragStop={(_, position) =>
@@ -59,6 +84,7 @@ export function ImGuiWindowContainer({
       style={{ zIndex: layout.zIndex }}
       className="overflow-hidden rounded-md border border-[#506982] bg-[#1a1a1a] shadow-[0_3px_8px_rgba(0,0,0,0.45)]"
     >
+      <ImGuiWindowContext.Provider value={controls}>
       <div className="imgui-window-titlebar flex h-7 cursor-grab select-none items-center bg-[#2d4b75] px-2 font-mono text-[17px] leading-none text-white active:cursor-grabbing">
         <button
           type="button"
@@ -88,6 +114,7 @@ export function ImGuiWindowContainer({
           {children}
         </div>
       )}
+      </ImGuiWindowContext.Provider>
     </Rnd>
   )
 }

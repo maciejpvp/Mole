@@ -27,7 +27,10 @@ export type UserProfile = AuthenticatedUser & {
     monthly_transfer_bytes_used: number
     limit_reached_at: string | null
   }
-  tunnels: unknown[]
+  tunnels: Array<{
+    id: string
+    status: string
+  }>
 }
 
 export async function login(input: { identifier: string; password: string }) {
