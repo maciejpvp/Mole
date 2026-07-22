@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  min-height: 100vh;
+}
+
+body {
+  @apply bg-zinc-900;
+  margin: 0;
+}
+
+.imgui-resize-grip {
+  bottom: 0;
+  cursor: nwse-resize;
+  height: 0;
+  position: absolute;
+  right: 0;
+  width: 0;
+  border-bottom: 0 solid transparent;
+  border-left: 16px solid transparent;
+  border-top: 16px solid #456382;
+}
