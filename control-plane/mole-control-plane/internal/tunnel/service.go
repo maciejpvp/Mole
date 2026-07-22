@@ -164,9 +164,9 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 		INSERT INTO tunnels (
 			id, user_id, proto, outbound_port, inbound_ip, inbound_port,
 			server_address, connection_token_hash, status, started_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'inactive', NULL)`,
 		tunnelID, userID, protoNumber, provisioned.OutboundPort, internalIP.String(), internalPort,
-		net.JoinHostPort(provisioned.PublicHost, strconv.Itoa(provisioned.ControlPort)), tokenHash[:], now,
+		net.JoinHostPort(provisioned.PublicHost, strconv.Itoa(provisioned.ControlPort)), tokenHash[:],
 	)
 	if err != nil {
 		return Tunnel{}, fmt.Errorf("store tunnel: %w", err)
@@ -187,8 +187,49 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 	}, nil
 }
 
-// ConnectionConfigForToken resolves a still-active tunnel without requiring a
-// user session. The tunnel token is an unguessable bearer credential.
+// Delete removes a user's tunnel from the control plane and releases its
+// public listener on the relay.
+func (s *Service) Delete(ctx context.Context, userID, tunnelID string) error {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(tunnelID) == "" {
+		return ErrInvalidInput
+	}
+	if s.provisioner == nil {
+		return ErrUnavailable
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin tunnel deletion: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var storedID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM tunnels
+		WHERE id = $1 AND user_id = $2
+		FOR UPDATE`, tunnelID, userID).Scan(&storedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("find tunnel for deletion: %w", err)
+	}
+
+	if err := s.provisioner.Deprovision(ctx, storedID); err != nil {
+		return fmt.Errorf("deprovision tunnel: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tunnels WHERE id = $1", storedID); err != nil {
+		return fmt.Errorf("delete tunnel: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tunnel deletion: %w", err)
+	}
+	return nil
+}
+
+// ConnectionConfigForToken resolves a provisioned tunnel without requiring a
+// user session. The token is generated and persisted by the control plane; the
+// relay only receives it to authenticate the client connection.
 func (s *Service) ConnectionConfigForToken(ctx context.Context, token string) (ConnectionConfig, error) {
 	if strings.TrimSpace(token) == "" {
 		return ConnectionConfig{}, ErrNotFound
@@ -203,7 +244,7 @@ func (s *Service) ConnectionConfigForToken(ctx context.Context, token string) (C
 	err := s.db.QueryRowContext(ctx, `
 		SELECT host(inbound_ip), inbound_port, proto, server_address
 		FROM tunnels
-		WHERE connection_token_hash = $1 AND status = 'active'`, tokenHash[:]).Scan(
+		WHERE connection_token_hash = $1 AND status IN ('inactive', 'active')`, tokenHash[:]).Scan(
 		&internalIP, &internalPort, &proto, &config.ServerAddress,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -221,6 +262,31 @@ func (s *Service) ConnectionConfigForToken(ctx context.Context, token string) (C
 	}
 	config.InternalAddress = net.JoinHostPort(internalIP, strconv.Itoa(internalPort))
 	return config, nil
+}
+
+// SetConnectionStatus records the relay's authoritative client connection
+// state. A tunnel starts inactive and becomes active only after the relay has
+// authenticated a client connection.
+func (s *Service) SetConnectionStatus(ctx context.Context, tunnelID, status string) error {
+	if strings.TrimSpace(tunnelID) == "" || (status != "active" && status != "inactive") {
+		return ErrInvalidInput
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE tunnels
+		SET status = $1,
+			started_at = CASE WHEN $1 = 'active' THEN CURRENT_TIMESTAMP ELSE NULL END
+		WHERE id = $2 AND status IN ('inactive', 'active')`, status, tunnelID)
+	if err != nil {
+		return fmt.Errorf("set tunnel connection status: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read tunnel connection status result: %w", err)
+	}
+	if updated == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ApplyUsage persists deltas reported by a tunnel server and returns every

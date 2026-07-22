@@ -70,7 +70,7 @@ CREATE TABLE tunnels (
     inbound_port INTEGER NOT NULL,
     server_address TEXT NOT NULL,
     connection_token_hash BYTEA NOT NULL UNIQUE,
-    status TEXT NOT NULL DEFAULT 'stopped',
+    status TEXT NOT NULL DEFAULT 'inactive',
     started_at TIMESTAMPTZ,
     stopped_at TIMESTAMPTZ,
     current_period_minutes BIGINT NOT NULL DEFAULT 0,
@@ -79,7 +79,7 @@ CREATE TABLE tunnels (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT tunnels_outbound_port_valid CHECK (outbound_port BETWEEN 1 AND 65535),
     CONSTRAINT tunnels_inbound_port_valid CHECK (inbound_port BETWEEN 1 AND 65535),
-    CONSTRAINT tunnels_status_valid CHECK (status IN ('active', 'stopped')),
+    CONSTRAINT tunnels_status_valid CHECK (status IN ('inactive', 'active', 'stopped')),
     CONSTRAINT tunnels_proto_valid CHECK (proto IN (6, 17)),
     CONSTRAINT tunnels_current_period_minutes_nonnegative CHECK (current_period_minutes >= 0),
     CONSTRAINT tunnels_current_period_transfer_bytes_nonnegative CHECK (current_period_transfer_bytes >= 0)
@@ -87,12 +87,12 @@ CREATE TABLE tunnels (
 
 CREATE INDEX tunnels_user_id_idx ON tunnels (user_id);
 CREATE INDEX tunnels_user_id_status_idx ON tunnels (user_id, status);
-CREATE UNIQUE INDEX tunnels_active_outbound_port_unique ON tunnels (outbound_port) WHERE status = 'active';
+CREATE UNIQUE INDEX tunnels_active_outbound_port_unique ON tunnels (outbound_port) WHERE status IN ('inactive', 'active');
 
 COMMENT ON COLUMN tunnels.outbound_port IS 'Public port exposed by the control plane.';
 COMMENT ON COLUMN tunnels.inbound_ip IS 'IP address of the service receiving tunneled traffic.';
 COMMENT ON COLUMN tunnels.inbound_port IS 'Port of the service receiving tunneled traffic.';
-COMMENT ON COLUMN tunnels.status IS 'active while accepting traffic; stopped after manual or quota enforcement shutdown.';
+COMMENT ON COLUMN tunnels.status IS 'inactive until the client connects, active while connected, stopped after manual or quota enforcement shutdown.';
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$

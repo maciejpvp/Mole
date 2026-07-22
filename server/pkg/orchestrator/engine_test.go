@@ -28,6 +28,18 @@ func TestProvisionAndDeprovision(t *testing.T) {
 	}
 }
 
+func TestConnectionStatusUpdates(t *testing.T) {
+	engine, err := New(Config{ControlPort: 9000, PortMin: 10000, PortMax: 10000, PublicHost: "tunnels.example.test"})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	engine.recordConnectionStatus("tunnel-1", "active")
+	update := <-engine.ConnectionStatusUpdates()
+	if update.TunnelID != "tunnel-1" || update.Status != "active" {
+		t.Fatalf("unexpected connection status update: %+v", update)
+	}
+}
+
 func TestUDPFrameRoundTrip(t *testing.T) {
 	left, right := net.Pipe()
 	defer left.Close()

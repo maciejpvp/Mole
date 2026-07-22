@@ -56,6 +56,13 @@ type UsageUpdate struct {
 	TransferBytes int64  `json:"transfer_bytes"`
 }
 
+// ConnectionStatusUpdate is emitted when an authenticated client connects to
+// or disconnects from its relay tunnel.
+type ConnectionStatusUpdate struct {
+	TunnelID string `json:"tunnel_id"`
+	Status   string `json:"status"`
+}
+
 // Engine is the in-memory tunnel registry for one relay instance.
 type Engine struct {
 	cfg Config
@@ -65,6 +72,8 @@ type Engine struct {
 	tokens   map[[sha256.Size]byte]*tunnel
 	users    map[string]*userUsage
 	usedPort map[int]struct{}
+
+	connectionStatusUpdates chan ConnectionStatusUpdate
 
 	controlLn net.Listener
 	stopCh    chan struct{}
@@ -109,13 +118,28 @@ func New(cfg Config) (*Engine, error) {
 		return nil, errors.New("invalid relay configuration")
 	}
 	return &Engine{
-		cfg:      cfg,
-		tunnels:  make(map[string]*tunnel),
-		tokens:   make(map[[sha256.Size]byte]*tunnel),
-		users:    make(map[string]*userUsage),
-		usedPort: make(map[int]struct{}),
-		stopCh:   make(chan struct{}),
+		cfg:                     cfg,
+		tunnels:                 make(map[string]*tunnel),
+		tokens:                  make(map[[sha256.Size]byte]*tunnel),
+		users:                   make(map[string]*userUsage),
+		usedPort:                make(map[int]struct{}),
+		connectionStatusUpdates: make(chan ConnectionStatusUpdate, 256),
+		stopCh:                  make(chan struct{}),
 	}, nil
+}
+
+// ConnectionStatusUpdates returns relay-authenticated connection changes in
+// order. The control-plane sync worker is the sole consumer.
+func (e *Engine) ConnectionStatusUpdates() <-chan ConnectionStatusUpdate {
+	return e.connectionStatusUpdates
+}
+
+func (e *Engine) recordConnectionStatus(tunnelID, status string) {
+	select {
+	case e.connectionStatusUpdates <- ConnectionStatusUpdate{TunnelID: tunnelID, Status: status}:
+	default:
+		log.Printf("[orchestrator] connection-status queue full; dropping %s update for %s", status, tunnelID)
+	}
 }
 
 // Run starts the fixed control listener. Public listeners are created by
@@ -340,8 +364,14 @@ func (e *Engine) bindPublicListenerLocked(item *tunnel) (int, error) {
 }
 
 func (t *tunnel) acceptTCP() {
+	t.mu.Lock()
+	listener := t.tcpListener
+	t.mu.Unlock()
+	if listener == nil {
+		return
+	}
 	for {
-		conn, err := t.tcpListener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			if !t.isStopped() {
 				log.Printf("[orchestrator] tunnel %s accept error: %v", t.id, err)
@@ -368,9 +398,15 @@ func (t *tunnel) bridgeTCP(publicConn net.Conn) {
 }
 
 func (t *tunnel) relayUDP() {
+	t.mu.Lock()
+	listener := t.udpListener
+	t.mu.Unlock()
+	if listener == nil {
+		return
+	}
 	buffer := make([]byte, 65535)
 	for {
-		n, remote, err := t.udpListener.ReadFromUDP(buffer)
+		n, remote, err := listener.ReadFromUDP(buffer)
 		if err != nil {
 			if !t.isStopped() {
 				log.Printf("[orchestrator] UDP tunnel %s read error: %v", t.id, err)
@@ -400,6 +436,7 @@ func (t *tunnel) setControl(conn net.Conn) {
 	if previous != nil {
 		_ = previous.Close()
 	}
+	t.engine.recordConnectionStatus(t.id, "active")
 	go func() {
 		buffer := make([]byte, 1)
 		for {
@@ -412,11 +449,13 @@ func (t *tunnel) setControl(conn net.Conn) {
 }
 
 func (t *tunnel) clearControl(conn net.Conn) {
+	cleared := false
 	t.mu.Lock()
 	minutes := int64(0)
 	if t.control == conn {
 		minutes = t.flushActiveDurationLocked(time.Now())
 		t.control = nil
+		cleared = true
 		t.activeSince = time.Time{}
 		if t.udpBridge != nil {
 			_ = t.udpBridge.Close()
@@ -425,6 +464,9 @@ func (t *tunnel) clearControl(conn net.Conn) {
 	}
 	t.mu.Unlock()
 	t.engine.recordMinutes(t.userID, minutes)
+	if cleared {
+		t.engine.recordConnectionStatus(t.id, "inactive")
+	}
 }
 
 func (t *tunnel) signal(signal byte) error {

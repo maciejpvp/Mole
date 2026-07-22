@@ -39,6 +39,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	orchestrator.StartUsageSync(ctx, engine, cfg.UsageSyncURL, cfg.UsageSyncToken, 5*time.Minute)
+	orchestrator.StartConnectionStatusSync(ctx, engine, cfg.UsageSyncURL, cfg.UsageSyncToken)
 
 	managementServer := &http.Server{Addr: cfg.APIListen, Handler: orchestrator.NewManagementAPI(engine, cfg.APIToken), ReadHeaderTimeout: 5 * time.Second}
 	go func() {

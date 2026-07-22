@@ -190,7 +190,7 @@ func TestTunnelsMigration(t *testing.T) {
 		t.Fatalf("query tunnel: %v", err)
 	}
 
-	if userID != "test-user" || outboundPort != 8080 || inboundIP != "127.0.0.1" || inboundPort != 3000 || status != "stopped" || currentPeriodMinutes != 0 || currentPeriodTransferBytes != 0 {
+	if userID != "test-user" || outboundPort != 8080 || inboundIP != "127.0.0.1" || inboundPort != 3000 || status != "inactive" || currentPeriodMinutes != 0 || currentPeriodTransferBytes != 0 {
 		t.Fatalf("unexpected tunnel values: %q, %d, %q, %d, %q, %d, %d", userID, outboundPort, inboundIP, inboundPort, status, currentPeriodMinutes, currentPeriodTransferBytes)
 	}
 }

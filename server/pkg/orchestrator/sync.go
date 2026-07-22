@@ -35,6 +35,51 @@ func StartUsageSync(ctx context.Context, engine *Engine, endpoint, token string,
 	}()
 }
 
+// StartConnectionStatusSync persists client connection state as soon as the
+// relay authenticates a client or observes it disconnect. The relay consumes
+// the token provided by the control plane; it never generates one.
+func StartConnectionStatusSync(ctx context.Context, engine *Engine, endpoint, token string) {
+	if endpoint == "" || token == "" {
+		log.Printf("[orchestrator] connection-status sync disabled: endpoint or token is missing")
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case update := <-engine.ConnectionStatusUpdates():
+				syncConnectionStatus(ctx, client, endpoint, token, update)
+			}
+		}
+	}()
+}
+
+func syncConnectionStatus(ctx context.Context, client *http.Client, endpoint, token string, update ConnectionStatusUpdate) {
+	payload, err := json.Marshal(update)
+	if err != nil {
+		log.Printf("[orchestrator] marshal connection-status sync: %v", err)
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(endpoint, "/")+"/internal/v1/tunnels/status", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[orchestrator] create connection-status sync request: %v", err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(req)
+	if err != nil {
+		log.Printf("[orchestrator] connection-status sync: %v", err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		log.Printf("[orchestrator] connection-status sync failed: %s", response.Status)
+	}
+}
+
 func syncUsage(ctx context.Context, client *http.Client, engine *Engine, endpoint, token string) {
 	updates := engine.CollectUsage(time.Now())
 	if len(updates) == 0 {

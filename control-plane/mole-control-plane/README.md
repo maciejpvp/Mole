@@ -76,6 +76,17 @@ new `token`. Save the token securely and start the client with it:
 mole-client --mole-url https://control-plane-address --token <token>
 ```
 
+Delete a tunnel with the authenticated user's session token:
+
+```http
+DELETE /api/v1/tunnels/<tunnel_id>
+Authorization: Bearer <access_token>
+```
+
+New tunnels are returned with status `inactive`. The relay changes the status
+to `active` only after it authenticates the client connection, and changes it
+back to `inactive` when that client disconnects.
+
 For the local development configuration, use `--mole-url http://127.0.0.1:8080`.
 
 Set these control-plane environment variables to enable provisioning:
