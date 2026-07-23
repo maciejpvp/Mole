@@ -55,7 +55,8 @@ export function AuthWindow() {
         : ''
 
   const switchMode = () => {
-    setMode((current) => current === 'login' ? 'register' : 'login')
+    const nextMode = mode === 'login' ? 'register' : 'login'
+    setMode(nextMode)
     authMutation.reset()
   }
 

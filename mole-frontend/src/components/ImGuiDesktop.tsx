@@ -15,6 +15,10 @@ export type DesktopWindow = {
   title: string
   layout: NormalizedWindowLayout
   children: ReactNode
+  /** Whether the user can resize this window. Defaults to true. */
+  isResizable?: boolean
+  showCloseBtn?: boolean
+  onClose?: () => void
 }
 
 type ImGuiDesktopProps = {
@@ -69,6 +73,20 @@ export function ImGuiDesktop({ windows }: ImGuiDesktopProps) {
         },
       })),
   )
+
+  useEffect(() => {
+    setDismissedWindowIDs((current) => {
+      let changed = false
+      const next = new Set(current)
+      windows.forEach((w) => {
+        if (next.has(w.id)) {
+          next.delete(w.id)
+          changed = true
+        }
+      })
+      return changed ? next : current
+    })
+  }, [windows])
 
   // Reconcile dynamic definitions (such as user-only windows) while retaining
   // user-closed windows as dismissed instead of reopening them on each render.
@@ -155,8 +173,11 @@ export function ImGuiDesktop({ windows }: ImGuiDesktopProps) {
             key={window.id}
             title={definition.title}
             layout={toPixels(window.layout)}
+            isResizable={definition.isResizable ?? true}
+            showCloseBtn={definition.showCloseBtn ?? false}
             onFocus={() => bringToFront(window.id)}
             onClose={() => {
+              definition.onClose?.()
               setDismissedWindowIDs((current) => new Set(current).add(window.id))
               setOpenWindows((current) => current.filter((item) => item.id !== window.id))
             }}

@@ -22,3 +22,59 @@ body {
   border-left: 16px solid transparent;
   border-top: 16px solid #456382;
 }
+
+/* ==========================================================================
+   Custom Web Page Scrollbar (ImGui / Retro Dark Aesthetic)
+   ========================================================================== */
+
+/* --- Firefox Standard Syntax --- */
+* {
+  scrollbar-width: thin !important;
+  scrollbar-color: #3e4451 #0f1115 !important;
+}
+
+/* --- WebKit / Chromium (Chrome, Edge, Safari) --- */
+
+/* Scrollbar Track Container Width */
+::-webkit-scrollbar {
+  width: 8px !important;
+  height: 8px !important;
+  background-color: #0f1115 !important;
+}
+
+/* Track (Background behind the bar) */
+::-webkit-scrollbar-track {
+  background: #0f1115 !important;
+  border-left: 1px solid #2b2f3a !important;
+}
+
+/* Scrollbar Corner (Where horizontal & vertical meet) */
+::-webkit-scrollbar-corner {
+  background: #0f1115 !important;
+}
+
+/* Handle / Thumb */
+::-webkit-scrollbar-thumb {
+  background-color: #2b2f3a !important;
+  border: 1px solid #404859 !important;
+  border-radius: 0px !important;
+}
+
+/* Handle Hover */
+::-webkit-scrollbar-thumb:hover {
+  background-color: #569cd6 !important;
+  border-color: #569cd6 !important;
+}
+
+/* Handle Active / Dragged */
+::-webkit-scrollbar-thumb:active {
+  background-color: #4ec9b0 !important;
+  border-color: #4ec9b0 !important;
+}
+
+/* Scrollbar Buttons (Up/Down Arrows) - Hidden for clean square look */
+::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}

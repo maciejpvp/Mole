@@ -13,6 +13,20 @@ export type Authentication = {
   expires_at: string
 }
 
+export type Tunnel = {
+  id: string
+  proto: string
+  internal_address: string
+  outbound_port: number
+  server_address: string
+  status: string
+  started_at?: string | null
+  stopped_at?: string | null
+  current_period_minutes?: number
+  current_period_transfer_bytes?: number
+  created_at?: string
+}
+
 export type UserProfile = AuthenticatedUser & {
   created_at: string
   last_login_at: string | null
@@ -27,10 +41,7 @@ export type UserProfile = AuthenticatedUser & {
     monthly_transfer_bytes_used: number
     limit_reached_at: string | null
   }
-  tunnels: Array<{
-    id: string
-    status: string
-  }>
+  tunnels: Tunnel[]
 }
 
 export async function login(input: { identifier: string; password: string }) {
