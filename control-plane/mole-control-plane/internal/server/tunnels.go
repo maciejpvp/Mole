@@ -138,6 +138,8 @@ func (s *Server) syncTunnelConnectionStatusHandler(w http.ResponseWriter, r *htt
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid connection status"})
 		case errors.Is(err, tunnel.ErrNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "tunnel not found"})
+		case errors.Is(err, tunnel.ErrLimitReached):
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "plan limit reached"})
 		default:
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to update tunnel status"})
 		}

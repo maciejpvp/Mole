@@ -115,7 +115,7 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 	}
 
 	var activeCount int64
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM tunnels WHERE user_id = $1 AND status = 'active'", userID).Scan(&activeCount); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM tunnels WHERE user_id = $1 AND status IN ('inactive', 'active')", userID).Scan(&activeCount); err != nil {
 		return Tunnel{}, fmt.Errorf("count active tunnels: %w", err)
 	}
 	if limits.maxActiveTunnels.Valid && activeCount >= limits.maxActiveTunnels.Int64 {
@@ -271,20 +271,51 @@ func (s *Service) SetConnectionStatus(ctx context.Context, tunnelID, status stri
 	if strings.TrimSpace(tunnelID) == "" || (status != "active" && status != "inactive") {
 		return ErrInvalidInput
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin set connection status: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var (
+		userID        string
+		currentStatus string
+	)
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_id, status FROM tunnels
+		WHERE id = $1 AND status IN ('inactive', 'active')
+		FOR UPDATE`, tunnelID).Scan(&userID, &currentStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("find tunnel for connection status: %w", err)
+	}
+
+	if status == "active" && currentStatus == "inactive" {
+		limits, err := lockAndRefreshUserUsage(ctx, tx, userID, s.now().UTC())
+		if err != nil {
+			return err
+		}
+		var activeCount int64
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM tunnels WHERE user_id = $1 AND status = 'active'", userID).Scan(&activeCount); err != nil {
+			return fmt.Errorf("count active tunnels: %w", err)
+		}
+		if limits.maxActiveTunnels.Valid && activeCount >= limits.maxActiveTunnels.Int64 {
+			return ErrLimitReached
+		}
+	}
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE tunnels
 		SET status = $1,
 			started_at = CASE WHEN $1 = 'active' THEN CURRENT_TIMESTAMP ELSE NULL END
-		WHERE id = $2 AND status IN ('inactive', 'active')`, status, tunnelID)
+		WHERE id = $2`, status, tunnelID)
 	if err != nil {
 		return fmt.Errorf("set tunnel connection status: %w", err)
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read tunnel connection status result: %w", err)
-	}
-	if updated == 0 {
-		return ErrNotFound
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tunnel connection status: %w", err)
 	}
 	return nil
 }
