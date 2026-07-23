@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"log"
 	"net"
 	"sync"
@@ -32,19 +33,48 @@ type Agent struct {
 	localProto  string // "tcp" or "udp"
 	token       string
 
+	ctx      context.Context
+	cancel   context.CancelFunc
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+
+	mu          sync.Mutex
+	activeConns map[net.Conn]struct{}
 }
 
 func New(serverAddr, localTarget, localProto, token string) *Agent {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Agent{
 		serverAddr:  serverAddr,
 		localTarget: localTarget,
 		localProto:  localProto,
 		token:       token,
+		ctx:         ctx,
+		cancel:      cancel,
 		stopCh:      make(chan struct{}),
+		activeConns: make(map[net.Conn]struct{}),
 	}
+}
+
+func (a *Agent) trackConn(c net.Conn) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	select {
+	case <-a.stopCh:
+		c.Close()
+		return false
+	default:
+		a.activeConns[c] = struct{}{}
+		return true
+	}
+}
+
+func (a *Agent) untrackConn(c net.Conn) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.activeConns, c)
+	c.Close()
 }
 
 func (a *Agent) Run() {
@@ -59,34 +89,65 @@ func (a *Agent) Run() {
 
 		logDebug("[agent] connecting to server %s (proto=%s local=%s)", a.serverAddr, a.localProto, a.localTarget)
 
-		conn, err := net.DialTimeout("tcp", a.serverAddr, 10*time.Second)
+		dialCtx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		var dialer net.Dialer
+		conn, err := dialer.DialContext(dialCtx, "tcp", a.serverAddr)
+		cancel()
+
 		if err != nil {
+			select {
+			case <-a.stopCh:
+				return
+			default:
+			}
 			logDebug("[agent] dial failed: %v — retrying in %s", err, backoff)
 			a.sleep(backoff)
 			backoff = min(backoff*2, backoffMax)
 			continue
 		}
 
+		if !a.trackConn(conn) {
+			return
+		}
+
 		logDebug("[agent] control connection established: local=%s remote=%s", conn.LocalAddr(), conn.RemoteAddr())
 		backoff = backoffBase
 
 		if err := a.sendHandshake(conn, roleControl); err != nil {
+			select {
+			case <-a.stopCh:
+				a.untrackConn(conn)
+				return
+			default:
+			}
 			logDebug("[agent] token handshake failed: %v — reconnecting", err)
-			conn.Close()
+			a.untrackConn(conn)
 			continue
 		}
 
 		a.readSignals(conn)
+		a.untrackConn(conn)
 
-		logDebug("[agent] control connection lost — reconnecting")
-		conn.Close()
+		select {
+		case <-a.stopCh:
+			return
+		default:
+			logDebug("[agent] control connection lost — reconnecting")
+		}
 	}
 }
 
-// Stop signals the agent to stop reconnecting and exit Run.
+// Stop signals the agent to stop reconnecting, closes all active connections, and exits Run.
 func (a *Agent) Stop() {
 	a.stopOnce.Do(func() {
+		a.cancel()
 		close(a.stopCh)
+		a.mu.Lock()
+		for c := range a.activeConns {
+			c.Close()
+		}
+		a.activeConns = make(map[net.Conn]struct{})
+		a.mu.Unlock()
 	})
 }
 
@@ -150,14 +211,21 @@ func (a *Agent) dispatchTCPBridge() {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		tunnelConn, err := net.DialTimeout("tcp", a.serverAddr, 10*time.Second)
+		dialCtx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		var dialer net.Dialer
+		tunnelConn, err := dialer.DialContext(dialCtx, "tcp", a.serverAddr)
+		cancel()
 		if err != nil {
 			logDebug("[agent] tunnel dial error: %v", err)
 			return
 		}
+		if !a.trackConn(tunnelConn) {
+			return
+		}
+		defer a.untrackConn(tunnelConn)
+
 		if err := a.sendHandshake(tunnelConn, roleTCPLeg); err != nil {
 			logDebug("[agent] TCP tunnel handshake error: %v", err)
-			tunnelConn.Close()
 			return
 		}
 		logDebug("[agent] tunnel leg opened: local=%s remote=%s", tunnelConn.LocalAddr(), tunnelConn.RemoteAddr())
@@ -170,14 +238,21 @@ func (a *Agent) dispatchUDPBridge() {
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		tunnelConn, err := net.DialTimeout("tcp", a.serverAddr, 10*time.Second)
+		dialCtx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		var dialer net.Dialer
+		tunnelConn, err := dialer.DialContext(dialCtx, "tcp", a.serverAddr)
+		cancel()
 		if err != nil {
 			logDebug("[agent] UDP bridge dial error: %v", err)
 			return
 		}
+		if !a.trackConn(tunnelConn) {
+			return
+		}
+		defer a.untrackConn(tunnelConn)
+
 		if err := a.sendHandshake(tunnelConn, roleUDPBridge); err != nil {
 			logDebug("[agent] UDP bridge handshake error: %v", err)
-			tunnelConn.Close()
 			return
 		}
 		BridgeUDP(tunnelConn, a.localTarget, a.stopCh)

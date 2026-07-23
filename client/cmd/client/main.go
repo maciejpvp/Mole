@@ -57,20 +57,22 @@ func main() {
 		agent.Stop()
 	}()
 
-	// Catch Ctrl+D (EOF on stdin) to stop the client.
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			_, err := os.Stdin.Read(buf)
-			if err != nil {
-				if debug {
-					log.Printf("[client] stdin closed (Ctrl+D) — shutting down")
+	// Catch Ctrl+D (EOF on stdin) to stop the client when running interactively.
+	if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				_, err := os.Stdin.Read(buf)
+				if err != nil {
+					if debug {
+						log.Printf("[client] stdin closed (Ctrl+D) — shutting down")
+					}
+					agent.Stop()
+					return
 				}
-				agent.Stop()
-				return
 			}
-		}
-	}()
+		}()
+	}
 
 	agent.Run()
 

@@ -63,6 +63,7 @@ func (s *Server) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.notifyUserUpdate(r.Context(), account.ID)
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -91,6 +92,7 @@ func (s *Server) deleteTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.notifyUserUpdate(r.Context(), account.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -118,6 +120,7 @@ func (s *Server) syncTunnelUsageHandler(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to sync usage"})
 		return
 	}
+	s.notifyUserUpdateForUsage(r.Context(), request.Updates)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -145,6 +148,7 @@ func (s *Server) syncTunnelConnectionStatusHandler(w http.ResponseWriter, r *htt
 		}
 		return
 	}
+	s.notifyUserUpdateForTunnel(r.Context(), request.TunnelID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -174,8 +178,11 @@ func (s *Server) authenticatedUser(r *http.Request) (user.User, error) {
 
 func bearerToken(r *http.Request) string {
 	value := r.Header.Get("Authorization")
-	if !strings.HasPrefix(value, "Bearer ") {
-		return ""
+	if strings.HasPrefix(value, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))
 	}
-	return strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))
+	if queryToken := r.URL.Query().Get("token"); queryToken != "" {
+		return strings.TrimSpace(queryToken)
+	}
+	return ""
 }

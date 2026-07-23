@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ImGuiDesktop } from './components/ImGuiDesktop'
 import { useAuthSession } from './auth/authSessionContext'
 import { useUser } from './hooks/useUser'
+import { useTunnelEvents } from './hooks/useTunnelEvents'
 import { AuthWindow } from './windows/AuthWindow'
 import { LimitsWindow } from './windows/LimitsWindow'
 import { TunnelsWindow } from './windows/TunnelsWindow'
@@ -10,6 +11,7 @@ import { CreateTunnelWindow } from './windows/CreateTunnelWindow'
 function App() {
   const { accessToken } = useAuthSession()
   const userQuery = useUser(accessToken)
+  const { isConnected } = useTunnelEvents(accessToken)
   const [isCreateTunnelOpen, setIsCreateTunnelOpen] = useState(false)
 
   const windows = [
@@ -29,7 +31,7 @@ function App() {
       id: 'tunnels',
       title: 'Tunnels',
       layout: { x: 0.05, y: 0.4, width: 0.9, height: 0.12 },
-      children: <TunnelsWindow user={userQuery.data} onCreateTunnel={() => setIsCreateTunnelOpen(true)} />,
+      children: <TunnelsWindow user={userQuery.data} isLiveConnected={isConnected} onCreateTunnel={() => setIsCreateTunnelOpen(true)} />,
     }] : []),
     ...(userQuery.data && isCreateTunnelOpen ? [{
       id: 'create_tunnel',

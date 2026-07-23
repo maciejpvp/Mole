@@ -21,6 +21,7 @@ type Server struct {
 
 	users   *user.Service
 	tunnels *tunnel.Service
+	broker  *Broker
 
 	tunnelSetupErr error
 }
@@ -30,7 +31,8 @@ func NewServer() *http.Server {
 	NewServer := &Server{
 		port: port,
 
-		db: database.New(),
+		db:     database.New(),
+		broker: NewBroker(),
 	}
 	NewServer.users = user.NewService(NewServer.db.DB())
 	provisioner, err := tunnel.NewHTTPProvisionerFromEnv()

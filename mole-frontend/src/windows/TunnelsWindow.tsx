@@ -21,11 +21,12 @@ function formatMinutes(minutes?: number): string {
 
 type TunnelsWindowProps = {
   user: UserProfile
+  isLiveConnected?: boolean
   onCreateTunnel?: () => void
   onDeleteTunnel?: (tunnelId: string) => void
 }
 
-export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsWindowProps) {
+export function TunnelsWindow({ user, isLiveConnected, onCreateTunnel, onDeleteTunnel }: TunnelsWindowProps) {
   const { tunnels = [] } = user
   const deleteTunnelMutation = useDeleteTunnel()
   const [copiedId, setCopiedId] = useState<string | null>(null)
@@ -48,8 +49,14 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
     <div className="font-mono text-[13px] leading-5 text-[#c5c5c5] select-none">
       {/* ImGui Window Title Bar with Top Right Actions */}
       <div className="mb-2 flex items-center justify-between border-b border-[#2b2f3a] pb-1">
-        <span className="text-[#569cd6] text-xs font-bold tracking-wider uppercase">
+        <span className="text-[#569cd6] text-xs font-bold tracking-wider uppercase flex items-center gap-2">
           [=] Active Tunnels [{tunnels.length}]
+          {isLiveConnected && (
+            <span className="text-[#4ec9b0] text-[11px] font-normal normal-case flex items-center gap-1" title="Real-time SSE stream connected">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#4ec9b0] animate-pulse" />
+              LIVE
+            </span>
+          )}
         </span>
         <button
           onClick={onCreateTunnel}
@@ -85,7 +92,7 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
             <span className="text-[#404859]">║</span>
             <span className="text-[#569cd6]"> TRANSFER   </span>
             <span className="text-[#404859]">║</span>
-            <span className="text-[#569cd6]"> UPTIME    </span>
+            <span className="text-[#569cd6]"> UPTIME   </span>
             <span className="text-[#404859]">║</span>
             <span className="text-[#569cd6]"> STATUS     </span>
             <span className="text-[#404859]">║</span>

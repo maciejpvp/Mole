@@ -30,6 +30,8 @@ func (s *Server) RegisterRoutes() http.Handler {
 		r.Post("/login", s.loginHandler)
 	})
 	r.Get("/api/v1/user/me", s.currentUserHandler)
+	r.Get("/api/v1/tunnels/events", s.eventsHandler)
+	r.Get("/api/v1/events", s.eventsHandler)
 	r.Post("/api/v1/tunnels", s.createTunnelHandler)
 	r.Delete("/api/v1/tunnels/{tunnelID}", s.deleteTunnelHandler)
 	r.Post("/api/v1/tunnels/connect", s.connectTunnelHandler)

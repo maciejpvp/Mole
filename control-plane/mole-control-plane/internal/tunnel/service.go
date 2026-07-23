@@ -491,6 +491,45 @@ func nullInt64Pointer(value sql.NullInt64) *int64 {
 	return &value.Int64
 }
 
+// GetUserIDForTunnel resolves the owner's user ID for a tunnel.
+func (s *Service) GetUserIDForTunnel(ctx context.Context, tunnelID string) (string, error) {
+	if strings.TrimSpace(tunnelID) == "" {
+		return "", ErrInvalidInput
+	}
+	var userID string
+	err := s.db.QueryRowContext(ctx, "SELECT user_id FROM tunnels WHERE id = $1", tunnelID).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get user id for tunnel: %w", err)
+	}
+	return userID, nil
+}
+
+// GetUserIDsForTunnels resolves distinct owner user IDs for multiple tunnels.
+func (s *Service) GetUserIDsForTunnels(ctx context.Context, tunnelIDs []string) ([]string, error) {
+	if len(tunnelIDs) == 0 {
+		return nil, nil
+	}
+	userIDs := make([]string, 0)
+	userMap := make(map[string]struct{})
+	for _, id := range tunnelIDs {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		var userID string
+		err := s.db.QueryRowContext(ctx, "SELECT user_id FROM tunnels WHERE id = $1", id).Scan(&userID)
+		if err == nil && userID != "" {
+			if _, exists := userMap[userID]; !exists {
+				userMap[userID] = struct{}{}
+				userIDs = append(userIDs, userID)
+			}
+		}
+	}
+	return userIDs, nil
+}
+
 // HTTPProvisioner calls the authenticated tunnel-server management API.
 type HTTPProvisioner struct {
 	baseURL string
