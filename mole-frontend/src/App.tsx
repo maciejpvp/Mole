@@ -31,7 +31,7 @@ function App() {
       id: 'tunnels',
       title: 'Tunnels',
       layout: { x: 0.05, y: 0.4, width: 0.9, height: 0.12 },
-      children: <TunnelsWindow user={userQuery.data} isLiveConnected={isConnected} onCreateTunnel={() => setIsCreateTunnelOpen(true)} />,
+      children: <TunnelsWindow user={userQuery.data} onCreateTunnel={() => setIsCreateTunnelOpen(true)} />,
     }] : []),
     ...(userQuery.data && isCreateTunnelOpen ? [{
       id: 'create_tunnel',
