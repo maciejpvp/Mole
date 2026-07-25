@@ -2,6 +2,7 @@ import { type FormEvent, useState } from 'react'
 import { ImGuiButton, ImGuiInputString } from '../components/imgui'
 import { formatOutboundAddress } from '../lib/api'
 import { useCreateTunnel } from '../hooks/useCreateTunnel'
+import { useWindowContext } from '../hooks/useWindowContext'
 
 function errorMessage(error: unknown) {
   if (typeof error === 'object' && error && 'response' in error) {
@@ -20,6 +21,9 @@ export function CreateTunnelWindow({ onClose }: CreateTunnelWindowProps) {
   const [internalAddress, setInternalAddress] = useState('127.0.0.1:8080')
   const [copied, setCopied] = useState(false)
   const createTunnelMutation = useCreateTunnel()
+  const { closeWindow } = useWindowContext()
+
+  const handleClose = onClose ?? (() => closeWindow('create_tunnel'))
 
   const handleSubmit = (e?: FormEvent) => {
     e?.preventDefault()
@@ -99,15 +103,13 @@ export function CreateTunnelWindow({ onClose }: CreateTunnelWindowProps) {
           >
             Create Another Tunnel
           </ImGuiButton>
-          {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="text-xs text-[#808080] hover:text-[#c5c5c5] px-2 py-1 border border-[#404859] bg-[#1e222b]"
-            >
-              [ Close ]
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleClose}
+            className="text-xs text-[#808080] hover:text-[#c5c5c5] px-2 py-1 border border-[#404859] bg-[#1e222b]"
+          >
+            [ Close ]
+          </button>
         </div>
       </div>
     )
@@ -172,15 +174,13 @@ export function CreateTunnelWindow({ onClose }: CreateTunnelWindowProps) {
         <ImGuiButton onClick={handleSubmit}>
           {createTunnelMutation.isPending ? 'Creating…' : 'Create Tunnel'}
         </ImGuiButton>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-xs text-[#808080] hover:text-[#c5c5c5] px-2 py-1"
-          >
-            [ Cancel ]
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={handleClose}
+          className="text-xs text-[#808080] hover:text-[#c5c5c5] px-2 py-1"
+        >
+          [ Cancel ]
+        </button>
       </div>
     </form>
   )

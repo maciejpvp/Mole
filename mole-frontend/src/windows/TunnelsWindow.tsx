@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { UserProfile } from '../lib/auth'
 import { formatOutboundAddress } from '../lib/api'
 import { useDeleteTunnel } from '../hooks/useDeleteTunnel'
+import { useWindowContext } from '../hooks/useWindowContext'
 
 function formatBytes(bytes?: number): string {
   if (bytes === undefined || bytes === null || isNaN(bytes)) return '0 B'
@@ -29,6 +30,9 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
   const { tunnels = [] } = user
   const deleteTunnelMutation = useDeleteTunnel()
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const { openWindow } = useWindowContext()
+
+  const handleCreateTunnel = onCreateTunnel ?? (() => openWindow('create_tunnel'))
 
   const handleDeleteTunnel = (tunnelId: string) => {
     if (onDeleteTunnel) {
@@ -52,7 +56,7 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
           [=] Active Tunnels [{tunnels.length}]
         </span>
         <button
-          onClick={onCreateTunnel}
+          onClick={handleCreateTunnel}
           className="text-xs text-[#4ec9b0] hover:text-[#9cdcfe] hover:bg-[#2b2f3a] px-1 py-0.5 rounded-none transition-colors border border-transparent hover:border-[#404859]"
         >
           [ + Create Tunnel ]
@@ -63,7 +67,7 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
         <div className="py-4 text-center border border-dashed border-[#2b2f3a]">
           <div className="text-[#6a9955] italic mb-2">// No active tunnels found</div>
           <button
-            onClick={onCreateTunnel}
+            onClick={handleCreateTunnel}
             className="text-[#4ec9b0] hover:text-[#9cdcfe] bg-[#1e222b] hover:bg-[#2b2f3a] px-2 py-1 text-xs border border-[#404859]"
           >
             [ + Create Tunnel ]
@@ -73,7 +77,7 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
         <div className="whitespace-pre overflow-x-auto text-[#d4d4d4]">
           {/* Header Top Border */}
           <div className="text-[#404859]">╔═══════╦══════════════════╦══════════════════════════╦════════════╦══════════╦════════════╦══════════════════╗</div>
-          
+
           {/* Table Header */}
           <div className="flex">
             <span className="text-[#404859]">║</span>
@@ -124,7 +128,7 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
                 <span className="text-[#404859]">║</span>
                 <span className={` ${statusColor}`}> {statusText} </span>
                 <span className="text-[#404859]">║</span>
-                
+
                 {/* Actions Cell */}
                 <span className="inline-flex items-center justify-between w-[18ch] px-1">
                   <button
