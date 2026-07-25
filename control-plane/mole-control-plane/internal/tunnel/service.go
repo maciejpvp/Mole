@@ -459,6 +459,45 @@ func usageAtLimit(limits userLimits) bool {
 		limits.monthlyTransferLimit.Valid && limits.monthlyTransferUsed >= limits.monthlyTransferLimit.Int64
 }
 
+func isSSRFForbiddenIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+
+	// Explicit check for IPv4 Link-local range 169.254.0.0/16 (covers Cloud Metadata 169.254.169.254)
+	_, linkLocal4, _ := net.ParseCIDR("169.254.0.0/16")
+	if linkLocal4.Contains(ip) {
+		return true
+	}
+
+	// Explicit check for IPv6 Link-local range fe80::/10 & AWS IPv6 IMDS
+	_, linkLocal6, _ := net.ParseCIDR("fe80::/10")
+	if linkLocal6.Contains(ip) || ip.Equal(net.ParseIP("fd00:ec2::254")) {
+		return true
+	}
+
+	if customRanges := os.Getenv("SSRF_BLOCKED_RANGES"); customRanges != "" {
+		for _, raw := range strings.Split(customRanges, ",") {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			if _, cidr, err := net.ParseCIDR(raw); err == nil && cidr.Contains(ip) {
+				return true
+			}
+			if targetIP := net.ParseIP(raw); targetIP != nil && targetIP.Equal(ip) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func validateInput(input CreateInput) (string, net.IP, int, error) {
 	protocol := strings.ToLower(strings.TrimSpace(input.Protocol))
 	if protocol != "tcp" && protocol != "udp" {
@@ -471,6 +510,9 @@ func validateInput(input CreateInput) (string, net.IP, int, error) {
 	ip := net.ParseIP(host)
 	port, err := strconv.Atoi(portText)
 	if ip == nil || err != nil || port < 1 || port > 65535 {
+		return "", nil, 0, ErrInvalidInput
+	}
+	if isSSRFForbiddenIP(ip) {
 		return "", nil, 0, ErrInvalidInput
 	}
 	return protocol, ip, port, nil

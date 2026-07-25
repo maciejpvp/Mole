@@ -4,31 +4,52 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"golang.org/x/time/rate"
 )
 
 func (s *Server) RegisterRoutes() http.Handler {
 	r := chi.NewRouter()
+
+	// 1. Core logger, security headers & max body size limit (1MB default)
 	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(SecurityHeadersMiddleware)
+	maxBodyBytes := GetEnvInt64("MAX_REQUEST_BODY_BYTES", 1<<20)
+	r.Use(MaxRequestBodySizeMiddleware(maxBodyBytes))
 
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"https://*", "http://*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	// 2. IP Blocking / Whitelisting middleware
+	ipBlocker := NewIPBlocker(os.Getenv("BLOCKED_IPS"), os.Getenv("ALLOWED_IPS"))
+	r.Use(ipBlocker.Handler)
 
+	// 3. Proper CORS configuration
+	r.Use(cors.Handler(BuildCORSConfig()))
+
+	// 4. Global API Rate Limiter
+	globalRPS := GetEnvFloat("RATE_LIMIT_RPS", 20.0)
+	globalBurst := GetEnvInt("RATE_LIMIT_BURST", 50)
+	globalLimiter := NewIPRateLimiter(rate.Limit(globalRPS), globalBurst)
+	r.Use(globalLimiter.Handler)
+
+	// Unrestricted / Health check endpoint
 	r.Get("/", s.HelloWorldHandler)
-
 	r.Get("/health", s.healthHandler)
+
+	// Auth Subrouter with Stricter Rate Limiter
+	authRPS := GetEnvFloat("AUTH_RATE_LIMIT_RPS", 2.0)
+	authBurst := GetEnvInt("AUTH_RATE_LIMIT_BURST", 5)
+	authLimiter := NewIPRateLimiter(rate.Limit(authRPS), authBurst)
+
 	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Use(authLimiter.Handler)
 		r.Post("/register", s.registerHandler)
 		r.Post("/login", s.loginHandler)
 	})
+
 	r.Get("/api/v1/user/me", s.currentUserHandler)
 	r.Get("/api/v1/tunnels/events", s.eventsHandler)
 	r.Get("/api/v1/events", s.eventsHandler)

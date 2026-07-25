@@ -24,6 +24,11 @@ func TestValidateInputRejectsInvalidEndpoint(t *testing.T) {
 		{Protocol: "tcp", InternalAddress: "localhost:25565"},
 		{Protocol: "udp", InternalAddress: "127.0.0.1:0"},
 		{Protocol: "udp", InternalAddress: "127.0.0.1"},
+		// SSRF targets: Cloud Metadata Services & Link-Local IPs
+		{Protocol: "tcp", InternalAddress: "169.254.169.254:80"},
+		{Protocol: "tcp", InternalAddress: "169.254.169.253:53"},
+		{Protocol: "tcp", InternalAddress: "169.254.1.1:8080"},
+		{Protocol: "tcp", InternalAddress: "0.0.0.0:80"},
 	}
 	for _, input := range tests {
 		if _, _, _, err := validateInput(input); err != ErrInvalidInput {

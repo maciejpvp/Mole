@@ -23,6 +23,10 @@ type loginRequest struct {
 }
 
 func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
+	if s.users == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "auth service unavailable"})
+		return
+	}
 	var request registerRequest
 	if err := decodeJSON(w, r, &request); err != nil {
 		return
@@ -49,6 +53,10 @@ func (s *Server) registerHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loginHandler(w http.ResponseWriter, r *http.Request) {
+	if s.users == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "auth service unavailable"})
+		return
+	}
 	var request loginRequest
 	if err := decodeJSON(w, r, &request); err != nil {
 		return
