@@ -56,7 +56,7 @@ services:
       - mole-internal
     # Note: Port 8080 is NOT exposed publicly on host. Traffic flows through Nginx (mole-proxy).
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
