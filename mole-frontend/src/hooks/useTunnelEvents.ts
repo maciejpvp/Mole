@@ -3,7 +3,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import { userQueryKey } from './useUser'
 import type { UserProfile } from '../lib/auth'
 
-const controlPlaneUrl = import.meta.env.VITE_CONTROL_PLANE_URL ?? 'http://127.0.0.1:8080'
+const controlPlaneUrl = import.meta.env.VITE_CONTROL_PLANE_URL !== undefined
+  ? import.meta.env.VITE_CONTROL_PLANE_URL
+  : 'http://127.0.0.1:8080'
 
 export function useTunnelEvents(accessToken: string | null) {
   const queryClient = useQueryClient()

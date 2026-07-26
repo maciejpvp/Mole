@@ -2,8 +2,12 @@ import axios from 'axios'
 
 const accessTokenKey = 'mole.access-token'
 
+const controlPlaneUrl = import.meta.env.VITE_CONTROL_PLANE_URL !== undefined
+  ? import.meta.env.VITE_CONTROL_PLANE_URL
+  : 'http://127.0.0.1:8080'
+
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_CONTROL_PLANE_URL ?? 'http://127.0.0.1:8080',
+  baseURL: controlPlaneUrl,
   headers: { 'Content-Type': 'application/json' },
 })
 

@@ -1,0 +1,104 @@
+services:
+  nginx:
+    build:
+      context: ./nginx
+    container_name: mole-proxy
+    restart: unless-stopped
+    user: root
+    depends_on:
+      - mole-control-plane
+      - mole-server
+      - mole-frontend
+    networks:
+      - mole-internal
+    ports:
+      - "${HTTP_PORT:-8080}:80"   # Production VPS: set HTTP_PORT=80
+      - "${HTTPS_PORT:-8443}:443" # Production VPS: set HTTPS_PORT=443
+      - "${MOLE_CONTROL_PORT:-9000}:9000/tcp" # Stream Proxied Control Port
+    # Configs are baked into the image via nginx/Dockerfile
+
+  postgres:
+    image: postgres:17
+    container_name: mole-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${BLUEPRINT_DB_DATABASE:-mole}
+      POSTGRES_USER: ${BLUEPRINT_DB_USERNAME:-mole}
+      POSTGRES_PASSWORD: ${BLUEPRINT_DB_PASSWORD:-change-me-in-production}
+    networks:
+      - mole-internal
+    volumes:
+      - psql_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BLUEPRINT_DB_USERNAME:-mole}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mole-control-plane:
+    build:
+      context: ./control-plane/mole-control-plane
+    container_name: mole-control-plane
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - mole-internal
+    # Note: Port 8080 is NOT exposed publicly on host. Traffic flows through Nginx (mole-proxy).
+    environment:
+      PORT: 8080
+      BLUEPRINT_DB_DATABASE: ${BLUEPRINT_DB_DATABASE:-mole}
+      BLUEPRINT_DB_USERNAME: ${BLUEPRINT_DB_USERNAME:-mole}
+      BLUEPRINT_DB_PASSWORD: ${BLUEPRINT_DB_PASSWORD:-change-me-in-production}
+      BLUEPRINT_DB_HOST: postgres
+      BLUEPRINT_DB_PORT: 5432
+      BLUEPRINT_DB_SCHEMA: public
+      TUNNEL_SERVER_URL: http://mole-server:9001
+      TUNNEL_SERVER_API_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://app.mole.com,http://localhost:3000}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-20}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-50}
+      AUTH_RATE_LIMIT_RPS: ${AUTH_RATE_LIMIT_RPS:-2}
+      AUTH_RATE_LIMIT_BURST: ${AUTH_RATE_LIMIT_BURST:-5}
+      BLOCKED_IPS: ${BLOCKED_IPS:-}
+      ALLOWED_IPS: ${ALLOWED_IPS:-}
+
+  mole-server:
+    build:
+      context: ./server
+    container_name: mole-server
+    restart: unless-stopped
+    depends_on:
+      - mole-control-plane
+    networks:
+      - mole-internal
+    ports:
+      # Public Tunnel Listener Port Range for TCP & UDP
+      - "${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}:${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}/tcp"
+      - "${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}:${MOLE_TUNNEL_PORT_MIN:-10000}-${MOLE_TUNNEL_PORT_MAX:-10100}/udp"
+    environment:
+      MOLE_CONTROL_PORT: ${MOLE_CONTROL_PORT:-9000}
+      MOLE_TUNNEL_PORT_MIN: ${MOLE_TUNNEL_PORT_MIN:-10000}
+      MOLE_TUNNEL_PORT_MAX: ${MOLE_TUNNEL_PORT_MAX:-10100}
+      MOLE_PUBLIC_HOST: ${MOLE_PUBLIC_HOST:-localhost}
+      MOLE_API_LISTEN: ":9001"
+      MOLE_SERVER_API_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
+      MOLE_CONTROL_PLANE_URL: http://mole-control-plane:8080
+      MOLE_USAGE_SYNC_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
+
+  mole-frontend:
+    build:
+      context: ./mole-frontend
+    container_name: mole-frontend
+    restart: unless-stopped
+    networks:
+      - mole-internal
+    # Not exposed publicly — nginx proxies / to mole-frontend:3000
+
+networks:
+  mole-internal:
+    driver: bridge
+
+volumes:
+  psql_data:
