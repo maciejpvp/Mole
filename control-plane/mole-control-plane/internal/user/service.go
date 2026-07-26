@@ -62,6 +62,7 @@ type User struct {
 // excludes credentials, session tokens, and tunnel connection tokens.
 type Profile struct {
 	User
+	IsAdmin     bool       `json:"is_admin,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	LastLoginAt *time.Time `json:"last_login_at"`
 	Limits      Limits     `json:"limits"`
@@ -264,7 +265,7 @@ func (s *Service) Profile(ctx context.Context, userID string) (Profile, error) {
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT users.id, users.username, users.email, plans.name,
-			users.created_at, users.last_login_at,
+			users.is_admin, users.created_at, users.last_login_at,
 			plans.max_active_tunnels, plans.monthly_minutes, plans.monthly_transfer_bytes,
 			users.usage_period_started_at, users.monthly_minutes_used,
 			users.monthly_transfer_bytes_used, users.usage_limit_reached_at
@@ -272,7 +273,7 @@ func (s *Service) Profile(ctx context.Context, userID string) (Profile, error) {
 		JOIN plans ON plans.id = users.plan_id
 		WHERE users.id = $1`, userID).Scan(
 		&profile.ID, &profile.Username, &profile.Email, &profile.Plan,
-		&profile.CreatedAt, &profile.LastLoginAt,
+		&profile.IsAdmin, &profile.CreatedAt, &profile.LastLoginAt,
 		&limits.MaxActiveTunnels, &limits.MonthlyMinutes, &limits.MonthlyTransferBytes,
 		&usage.PeriodStartedAt, &usage.MonthlyMinutesUsed,
 		&usage.MonthlyTransferBytes, &usage.LimitReachedAt,
