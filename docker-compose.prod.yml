@@ -5,16 +5,23 @@ services:
     restart: unless-stopped
     user: root
     depends_on:
-      - mole-control-plane
-      - mole-server
-      - mole-frontend
+      mole-control-plane:
+        condition: service_healthy
+      mole-server:
+        condition: service_started
+      mole-frontend:
+        condition: service_started
     networks:
       - mole-internal
     ports:
-      - "${HTTP_PORT:-8080}:80"   # Production VPS: set HTTP_PORT=80
-      - "${HTTPS_PORT:-8443}:443" # Production VPS: set HTTPS_PORT=443
+      - "${HTTP_PORT:-8080}:80"            # Production VPS: set HTTP_PORT=80
+      - "${HTTPS_PORT:-8443}:443"          # Production VPS: set HTTPS_PORT=443
       - "${MOLE_CONTROL_PORT:-9000}:9000/tcp" # Stream Proxied Control Port
     # Configs are baked into the image via nginx/Dockerfile
+    deploy:
+      resources:
+        limits:
+          memory: 96M
 
   postgres:
     image: postgres:17
@@ -33,6 +40,10 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
   mole-control-plane:
     image: maciekpvp/mole-control-plane:latest
@@ -44,6 +55,12 @@ services:
     networks:
       - mole-internal
     # Note: Port 8080 is NOT exposed publicly on host. Traffic flows through Nginx (mole-proxy).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     environment:
       PORT: 8080
       BLUEPRINT_DB_DATABASE: ${BLUEPRINT_DB_DATABASE:-mole}
@@ -54,20 +71,25 @@ services:
       BLUEPRINT_DB_SCHEMA: public
       TUNNEL_SERVER_URL: http://mole-server:9001
       TUNNEL_SERVER_API_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://app.mole.com,http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-20}
       RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-50}
       AUTH_RATE_LIMIT_RPS: ${AUTH_RATE_LIMIT_RPS:-2}
       AUTH_RATE_LIMIT_BURST: ${AUTH_RATE_LIMIT_BURST:-5}
       BLOCKED_IPS: ${BLOCKED_IPS:-}
       ALLOWED_IPS: ${ALLOWED_IPS:-}
+    deploy:
+      resources:
+        limits:
+          memory: 160M
 
   mole-server:
     image: maciekpvp/mole-server:latest
     container_name: mole-server
     restart: unless-stopped
     depends_on:
-      - mole-control-plane
+      mole-control-plane:
+        condition: service_healthy
     networks:
       - mole-internal
     ports:
@@ -83,6 +105,10 @@ services:
       MOLE_SERVER_API_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
       MOLE_CONTROL_PLANE_URL: http://mole-control-plane:8080
       MOLE_USAGE_SYNC_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
   mole-frontend:
     image: maciekpvp/mole-frontend:latest
@@ -91,10 +117,19 @@ services:
     networks:
       - mole-internal
     # Not exposed publicly — nginx proxies / to mole-frontend:3000
+    deploy:
+      resources:
+        limits:
+          memory: 64M
 
 networks:
   mole-internal:
     driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.200.1.0/24
+          gateway: 10.200.1.1
 
 volumes:
   psql_data:
