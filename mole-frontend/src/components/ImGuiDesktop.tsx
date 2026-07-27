@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { ImGuiWindowContainer, type WindowPixelLayout } from './imgui'
+import { roundFraction } from '../utils'
 
 // Every value is a fraction of the desktop canvas: 0 is its top/left edge and
 // 1 is its bottom/right edge. This makes saved layouts resolution independent.
@@ -50,9 +51,6 @@ function loadDesktopState(): PersistedDesktopState {
     return { layouts: {}, dismissedWindowIDs: [] }
   }
 }
-
-const clampFraction = (value: number) => Math.min(1, Math.max(0, value))
-const roundedFraction = (value: number) => Math.round(clampFraction(value) * 1_000_000) / 1_000_000
 
 export function ImGuiDesktop({ windows }: ImGuiDesktopProps) {
   const desktopRef = useRef<HTMLElement>(null)
@@ -156,10 +154,10 @@ export function ImGuiDesktop({ windows }: ImGuiDesktopProps) {
   })
 
   const toNormalized = (layout: Omit<WindowPixelLayout, 'zIndex'>): NormalizedWindowLayout => ({
-    x: roundedFraction(layout.x / canvasSize.width),
-    y: roundedFraction(layout.y / canvasSize.height),
-    width: roundedFraction(layout.width / canvasSize.width),
-    height: roundedFraction(layout.height / canvasSize.height),
+    x: roundFraction(layout.x / canvasSize.width),
+    y: roundFraction(layout.y / canvasSize.height),
+    width: roundFraction(layout.width / canvasSize.width),
+    height: roundFraction(layout.height / canvasSize.height),
   })
 
   return (

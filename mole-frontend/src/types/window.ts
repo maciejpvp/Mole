@@ -22,7 +22,9 @@ export interface WindowConfig {
 }
 
 export interface WindowContextType {
-  openWindow: (id: string) => void
+	addWindow: (window: WindowConfig, options?: { open?: boolean }) => void
+	removeWindow: (id: string) => void
+	openWindow: (id: string) => void
   closeWindow: (id: string) => void
   toggleWindow: (id: string) => void
   isWindowOpen: (id: string) => boolean

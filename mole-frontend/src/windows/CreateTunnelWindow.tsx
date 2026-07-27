@@ -1,16 +1,8 @@
 import { type FormEvent, useState } from 'react'
 import { ImGuiButton, ImGuiInputString } from '../components/imgui'
-import { formatOutboundAddress } from '../lib/api'
 import { useCreateTunnel } from '../hooks/useCreateTunnel'
 import { useWindowContext } from '../hooks/useWindowContext'
-
-function errorMessage(error: unknown) {
-  if (typeof error === 'object' && error && 'response' in error) {
-    const response = error.response as { data?: { error?: string } }
-    return response.data?.error ?? 'Failed to create tunnel'
-  }
-  return 'Unable to reach the control plane'
-}
+import { errorMessage, formatOutboundAddress } from '../utils'
 
 type CreateTunnelWindowProps = {
   onClose?: () => void
@@ -118,7 +110,7 @@ export function CreateTunnelWindow({ onClose }: CreateTunnelWindowProps) {
   const status = createTunnelMutation.isPending
     ? 'Creating tunnel…'
     : createTunnelMutation.error
-      ? errorMessage(createTunnelMutation.error)
+      ? errorMessage(createTunnelMutation.error, 'Failed to create tunnel')
       : ''
 
   return (

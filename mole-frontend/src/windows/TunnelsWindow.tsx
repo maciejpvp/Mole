@@ -1,24 +1,9 @@
 import { useState } from 'react'
 import type { UserProfile } from '../lib/auth'
-import { formatOutboundAddress } from '../lib/api'
 import { useDeleteTunnel } from '../hooks/useDeleteTunnel'
 import { useWindowContext } from '../hooks/useWindowContext'
-
-function formatBytes(bytes?: number): string {
-  if (bytes === undefined || bytes === null || isNaN(bytes)) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-function formatMinutes(minutes?: number): string {
-  if (minutes === undefined || minutes === null || isNaN(minutes)) return '0m'
-  if (minutes < 60) return `${minutes}m`
-  const hrs = Math.floor(minutes / 60)
-  const mins = minutes % 60
-  return `${hrs}h ${mins}m`
-}
+import { createCreateTunnelWindow } from './windowConfigs'
+import { formatBytes, formatMinutes, formatOutboundAddress } from '../utils'
 
 type TunnelsWindowProps = {
   user: UserProfile
@@ -30,9 +15,9 @@ export function TunnelsWindow({ user, onCreateTunnel, onDeleteTunnel }: TunnelsW
   const { tunnels = [] } = user
   const deleteTunnelMutation = useDeleteTunnel()
   const [copiedId, setCopiedId] = useState<string | null>(null)
-  const { openWindow } = useWindowContext()
+  const { addWindow } = useWindowContext()
 
-  const handleCreateTunnel = onCreateTunnel ?? (() => openWindow('create_tunnel'))
+  const handleCreateTunnel = onCreateTunnel ?? (() => addWindow(createCreateTunnelWindow()))
 
   const handleDeleteTunnel = (tunnelId: string) => {
     if (onDeleteTunnel) {

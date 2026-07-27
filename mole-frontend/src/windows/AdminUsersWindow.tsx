@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useAdminUsers } from '../hooks/useAdminUsers'
 import type { AdminUsersQuery } from '../lib/api'
+import { errorMessage, formatBytes, formatDate } from '../utils'
 
 const pageSizes = [25, 50, 100]
 const sortOptions: Array<{ value: AdminUsersQuery['sort']; label: string }> = [
@@ -9,23 +10,6 @@ const sortOptions: Array<{ value: AdminUsersQuery['sort']; label: string }> = [
 	{ value: 'username', label: 'Username' },
 	{ value: 'created_at', label: 'Created' },
 ]
-
-function formatBytes(bytes: number) {
-	if (!Number.isFinite(bytes)) return '—'
-	if (bytes < 1024) return `${bytes} B`
-	if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
-	if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
-	return `${(bytes / 1024 ** 3).toFixed(2)} GB`
-}
-
-function formatDate(value: string | null) {
-	if (!value) return '—'
-	return new Date(value).toLocaleString()
-}
-
-function errorMessage(error: unknown) {
-	return error instanceof Error ? error.message : 'Unable to load users'
-}
 
 export function AdminUsersWindow() {
 	const [searchInput, setSearchInput] = useState('')
@@ -115,7 +99,7 @@ export function AdminUsersWindow() {
 			</form>
 
 			{usersQuery.isLoading ? <div className="py-6 text-center text-[#6a9955]">// Loading users…</div> : null}
-			{usersQuery.isError ? <div className="border border-[#f44747] p-2 text-[#f44747]">// {errorMessage(usersQuery.error)}</div> : null}
+			{usersQuery.isError ? <div className="border border-[#f44747] p-2 text-[#f44747]">// {errorMessage(usersQuery.error, 'Unable to load users')}</div> : null}
 			{page ? (
 				<div className="min-h-0 flex-1 overflow-auto border border-[#2b2f3a]">
 					<table className="w-full min-w-[900px] border-collapse text-left">

@@ -1,7 +1,8 @@
 import { useWindowContext } from '../hooks/useWindowContext'
+import { createAdminUsersWindow } from './windowConfigs'
 
 export function AdminDashboardWindow() {
-	const { openWindow } = useWindowContext()
+	const { addWindow } = useWindowContext()
 
 	return (
 		<div className="font-mono text-[13px] leading-5 text-[#c5c5c5]">
@@ -9,7 +10,7 @@ export function AdminDashboardWindow() {
 				[=] Administrator tools
 			</div>
 			<button
-				onClick={() => openWindow('admin_users')}
+				onClick={() => addWindow(createAdminUsersWindow())}
 				className="border border-[#404859] bg-[#1e222b] px-3 py-2 text-[#4ec9b0] hover:border-[#569cd6] hover:bg-[#2b2f3a] hover:text-[#9cdcfe]"
 			>
 				[ ListUsers ]

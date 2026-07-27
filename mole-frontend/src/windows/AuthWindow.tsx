@@ -4,14 +4,7 @@ import { ImGuiButton, ImGuiInputString } from '../components/imgui'
 import { useAuthSession } from '../auth/authSessionContext'
 import { useUser, userQueryKey } from '../hooks/useUser'
 import { login, register } from '../lib/auth'
-
-function errorMessage(error: unknown) {
-  if (typeof error === 'object' && error && 'response' in error) {
-    const response = error.response as { data?: { error?: string } }
-    return response.data?.error ?? 'Authentication request failed'
-  }
-  return 'Unable to reach the control plane'
-}
+import { errorMessage } from '../utils'
 
 type AuthFormData = {
   email: string
@@ -49,7 +42,7 @@ export function AuthWindow() {
   const status = authMutation.isPending
     ? registerMode ? 'Creating account…' : 'Signing in…'
     : authMutation.error
-      ? errorMessage(authMutation.error)
+      ? errorMessage(authMutation.error, 'Authentication request failed')
       : userQuery.error
         ? 'Your saved session has expired. Please sign in again.'
         : ''

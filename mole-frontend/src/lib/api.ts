@@ -79,23 +79,6 @@ export function listAdminUsers(query: AdminUsersQuery) {
 
 export const deteteTunnel = deleteTunnel
 
-export function formatOutboundAddress(serverAddress?: string, outboundPort?: number): string {
-  if (!outboundPort) return serverAddress ?? ''
-  if (!serverAddress) return `:${outboundPort}`
-
-  let host = serverAddress.trim()
-  const colonCount = (host.match(/:/g) || []).length
-  if (colonCount === 1 || (colonCount > 1 && host.includes(']'))) {
-    const lastColon = host.lastIndexOf(':')
-    const possiblePort = host.substring(lastColon + 1)
-    if (/^\d+$/.test(possiblePort)) {
-      host = host.substring(0, lastColon)
-    }
-  }
-
-  return `${host}:${outboundPort}`
-}
-
 const savedToken = getAccessToken()
 if (savedToken) {
   api.defaults.headers.common.Authorization = `Bearer ${savedToken}`
