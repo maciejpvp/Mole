@@ -1,10 +1,11 @@
 import { api } from './api'
 
 export type AuthenticatedUser = {
-  id: string
-  username: string
-  email: string
-  plan: string
+	id: string
+	username: string
+	email: string
+	plan: string
+	is_admin?: boolean
 }
 
 export type Authentication = {
@@ -28,6 +29,7 @@ export type Tunnel = {
 }
 
 export type UserProfile = AuthenticatedUser & {
+	is_admin: boolean
   created_at: string
   last_login_at: string | null
   limits: {

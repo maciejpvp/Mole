@@ -45,7 +45,36 @@ export function createTunnel(input: CreateTunnelInput) {
 }
 
 export function deleteTunnel(id: string) {
-  return api.delete(`/api/v1/tunnels/${id}`)
+	return api.delete(`/api/v1/tunnels/${id}`)
+}
+
+export type AdminUser = {
+	id: string
+	username: string
+	email: string
+	plan: string
+	is_admin: boolean
+	monthly_minutes_used: number
+	monthly_transfer_bytes_used: number
+	created_at: string
+	last_login_at: string | null
+}
+
+export type AdminUsersPage = {
+	users: AdminUser[]
+	next_cursor?: string
+}
+
+export type AdminUsersQuery = {
+	limit: number
+	search?: string
+	cursor?: string
+	sort: 'transfer' | 'minutes' | 'username' | 'created_at'
+	direction: 'asc' | 'desc'
+}
+
+export function listAdminUsers(query: AdminUsersQuery) {
+	return api.get<AdminUsersPage>('/api/v1/admin/users', { params: query })
 }
 
 export const deteteTunnel = deleteTunnel
@@ -71,4 +100,3 @@ const savedToken = getAccessToken()
 if (savedToken) {
   api.defaults.headers.common.Authorization = `Bearer ${savedToken}`
 }
-
