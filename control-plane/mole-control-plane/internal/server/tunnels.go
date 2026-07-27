@@ -10,7 +10,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"mole-control-plane/internal/tunnel"
-	"mole-control-plane/internal/user"
 )
 
 type createTunnelRequest struct {
@@ -36,11 +35,7 @@ func (s *Server) createTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "tunnel provisioning is not configured"})
 		return
 	}
-	account, err := s.authenticatedUser(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
-		return
-	}
+	account := userFromContext(r.Context())
 
 	var request createTunnelRequest
 	if err := decodeJSON(w, r, &request); err != nil {
@@ -72,13 +67,9 @@ func (s *Server) deleteTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "tunnel provisioning is not configured"})
 		return
 	}
-	account, err := s.authenticatedUser(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
-		return
-	}
+	account := userFromContext(r.Context())
 	tunnelID := chi.URLParam(r, "tunnelID")
-	err = s.tunnels.Delete(r.Context(), account.ID, tunnelID)
+	err := s.tunnels.Delete(r.Context(), account.ID, tunnelID)
 	if err != nil {
 		switch {
 		case errors.Is(err, tunnel.ErrInvalidInput):
@@ -167,13 +158,6 @@ func (s *Server) connectTunnelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, config)
-}
-
-func (s *Server) authenticatedUser(r *http.Request) (user.User, error) {
-	if s.users == nil {
-		return user.User{}, user.ErrUnauthenticated
-	}
-	return s.users.Authenticate(r.Context(), bearerToken(r))
 }
 
 func bearerToken(r *http.Request) string {

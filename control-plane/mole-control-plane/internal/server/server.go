@@ -9,6 +9,7 @@ import (
 
 	_ "github.com/joho/godotenv/autoload"
 
+	"mole-control-plane/internal/admin"
 	"mole-control-plane/internal/database"
 	"mole-control-plane/internal/tunnel"
 	"mole-control-plane/internal/user"
@@ -20,6 +21,7 @@ type Server struct {
 	db database.Service
 
 	users   *user.Service
+	admin   *admin.Service
 	tunnels *tunnel.Service
 	broker  *Broker
 
@@ -35,6 +37,7 @@ func NewServer() *http.Server {
 		broker: NewBroker(),
 	}
 	NewServer.users = user.NewService(NewServer.db.DB())
+	NewServer.admin = admin.NewService(NewServer.db.DB())
 	provisioner, err := tunnel.NewHTTPProvisionerFromEnv()
 	NewServer.tunnels = tunnel.NewService(NewServer.db.DB(), provisioner)
 	NewServer.tunnelSetupErr = err

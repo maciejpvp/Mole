@@ -8,11 +8,7 @@ import (
 )
 
 func (s *Server) currentUserHandler(w http.ResponseWriter, r *http.Request) {
-	account, err := s.authenticatedUser(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
-		return
-	}
+	account := userFromContext(r.Context())
 
 	profile, err := s.users.Profile(r.Context(), account.ID)
 	if err != nil {

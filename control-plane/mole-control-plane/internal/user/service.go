@@ -56,6 +56,7 @@ type User struct {
 	Username string `json:"username"`
 	Email    string `json:"email"`
 	Plan     string `json:"plan"`
+	IsAdmin  bool   `json:"-"`
 }
 
 // Profile is the authenticated user's account snapshot. It intentionally
@@ -238,12 +239,12 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 	tokenHash := sha256.Sum256([]byte(token))
 	var account User
 	err := s.db.QueryRowContext(ctx, `
-		SELECT users.id, users.username, users.email, plans.name
+		SELECT users.id, users.username, users.email, plans.name, users.is_admin
 		FROM sessions
 		JOIN users ON users.id = sessions.user_id
 		JOIN plans ON plans.id = users.plan_id
 		WHERE sessions.token_hash = $1 AND sessions.expires_at > CURRENT_TIMESTAMP`, tokenHash[:]).Scan(
-		&account.ID, &account.Username, &account.Email, &account.Plan,
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrUnauthenticated

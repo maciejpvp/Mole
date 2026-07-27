@@ -49,6 +49,20 @@ make test
 
 ## Tunnel provisioning
 
+## Administrator user listing
+
+Administrators can list users with cursor pagination. Search is a
+case-insensitive username or email prefix search; supported sort fields are
+`transfer`, `minutes`, `username`, and `created_at`.
+
+```http
+GET /api/v1/admin/users?limit=50&search=alice&sort=transfer&direction=desc
+Authorization: Bearer <administrator_access_token>
+```
+
+When `next_cursor` is present, pass it as `cursor` to retrieve the next page.
+The endpoint never returns credentials or session tokens.
+
 Retrieve the authenticated account, current plan limits and usage, and all of
 its tunnels:
 

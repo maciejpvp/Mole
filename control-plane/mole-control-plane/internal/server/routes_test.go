@@ -37,3 +37,14 @@ func TestCurrentUserRouteRequiresAuthentication(t *testing.T) {
 		t.Errorf("expected status unauthorized; got %v", resp.Status)
 	}
 }
+
+func TestAdminUsersRouteRequiresAuthentication(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).RegisterRoutes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil))
+	resp := recorder.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected status unauthorized; got %v", resp.Status)
+	}
+}

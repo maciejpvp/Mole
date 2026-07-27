@@ -77,11 +77,7 @@ func (s *Server) eventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	account, err := s.authenticatedUser(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
-		return
-	}
+	account := userFromContext(r.Context())
 
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
