@@ -63,6 +63,24 @@ Authorization: Bearer <administrator_access_token>
 When `next_cursor` is present, pass it as `cursor` to retrieve the next page.
 The endpoint never returns credentials or session tokens.
 
+Administrators can change a user's plan by supplying a plan ID from the plan
+catalog:
+
+```http
+PATCH /api/v1/admin/users/user-id/plan
+Authorization: Bearer <administrator_access_token>
+Content-Type: application/json
+
+{"plan_id":2}
+```
+
+All authenticated users can list the available plans and their limits:
+
+```http
+GET /api/v1/plans
+Authorization: Bearer <access_token>
+```
+
 Retrieve the authenticated account, current plan limits and usage, and all of
 its tunnels:
 

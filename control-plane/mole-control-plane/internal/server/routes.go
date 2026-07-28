@@ -53,6 +53,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuthentication)
 		r.Get("/api/v1/user/me", s.currentUserHandler)
+		r.Get("/api/v1/plans", s.listPlansHandler)
 		r.Get("/api/v1/tunnels/events", s.eventsHandler)
 		r.Get("/api/v1/events", s.eventsHandler)
 		r.Post("/api/v1/tunnels", s.createTunnelHandler)
@@ -61,7 +62,8 @@ func (s *Server) RegisterRoutes() http.Handler {
 	r.Route("/api/v1/admin", func(r chi.Router) {
 		r.Use(s.requireAuthentication)
 		r.Use(requireAdministrator)
-		r.Get("/users", s.listAdminUsersHandler)
+		r.Get("/users", s.adminListUsersHandler)
+		r.Patch("/users/{userId}/plan", s.adminChangeUserPlanHandler)
 	})
 	r.Post("/api/v1/tunnels/connect", s.connectTunnelHandler)
 	r.Post("/internal/v1/tunnels/usage", s.syncTunnelUsageHandler)

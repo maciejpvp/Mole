@@ -30,3 +30,15 @@ If you are developing a production application, we recommend enabling type-aware
 ```
 
 See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+
+## Window architecture conventions
+
+Each window component owns its complete implementation, including the factory
+function that creates its `WindowConfig`. Keep the factory in the same
+`<WindowName>.tsx` file as the window component, and import it from there when
+another window needs to open it.
+
+Do not add individual window factory functions to `src/windows/windowConfigs.tsx`.
+That file is only for legacy/shared window registrations that have not yet been
+moved beside their components. New windows and refactored windows must keep
+their configuration and component together.

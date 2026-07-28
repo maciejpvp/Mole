@@ -13,7 +13,11 @@ import (
 	"time"
 )
 
-var ErrInvalidInput = errors.New("invalid admin query")
+var (
+	ErrInvalidInput = errors.New("invalid admin query")
+	ErrUserNotFound = errors.New("user not found")
+	ErrPlanNotFound = errors.New("plan not found")
+)
 
 const (
 	defaultPageSize = 50
@@ -175,6 +179,54 @@ func (s *Service) ListUsers(ctx context.Context, input ListUsersInput) (UserPage
 		page.NextCursor = encodeCursor(sortValue(last, sortField), last.ID)
 	}
 	return page, nil
+}
+
+// ChangeUserPlan assigns an existing plan to a user and returns the updated
+// user summary. Usage counters are intentionally preserved.
+func (s *Service) ChangeUserPlan(ctx context.Context, userID string, planID int64) (User, error) {
+	if s == nil || s.db == nil {
+		return User{}, errors.New("admin database unavailable")
+	}
+	if strings.TrimSpace(userID) == "" || planID < 1 {
+		return User{}, ErrInvalidInput
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("begin change user plan: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var existingPlanID int64
+	if err := tx.QueryRowContext(ctx, "SELECT id FROM plans WHERE id = $1", planID).Scan(&existingPlanID); errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrPlanNotFound
+	} else if err != nil {
+		return User{}, fmt.Errorf("find plan: %w", err)
+	}
+
+	var account User
+	err = tx.QueryRowContext(ctx, `
+		UPDATE users
+		SET plan_id = $1
+		WHERE id = $2
+		RETURNING users.id, users.username, users.email,
+			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin,
+			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
+			users.created_at, users.last_login_at`, planID, userID).Scan(
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
+		&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
+		&account.CreatedAt, &account.LastLoginAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("change user plan: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("commit user plan change: %w", err)
+	}
+	return account, nil
 }
 
 func typedCursorValue(value string, field SortField) (any, error) {

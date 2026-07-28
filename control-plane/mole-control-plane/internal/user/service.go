@@ -77,6 +77,14 @@ type Limits struct {
 	MonthlyTransferBytes *int64 `json:"monthly_transfer_bytes"`
 }
 
+type Plan struct {
+	ID                   int64  `json:"id"`
+	Name                 string `json:"name"`
+	MaxActiveTunnels     *int64 `json:"max_active_tunnels"`
+	MonthlyMinutes       *int64 `json:"monthly_minutes"`
+	MonthlyTransferBytes *int64 `json:"monthly_transfer_bytes"`
+}
+
 type Usage struct {
 	PeriodStartedAt      time.Time  `json:"period_started_at"`
 	MonthlyMinutesUsed   int64      `json:"monthly_minutes_used"`
@@ -106,6 +114,34 @@ type Authentication struct {
 
 func NewService(db *sql.DB) *Service {
 	return &Service{db: db, sessionTTL: defaultSessionTTL, now: time.Now}
+}
+
+func (s *Service) ListPlans(ctx context.Context) ([]Plan, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("user database unavailable")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, name, max_active_tunnels, monthly_minutes, monthly_transfer_bytes
+		FROM plans
+		ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list plans: %w", err)
+	}
+	defer rows.Close()
+
+	plans := make([]Plan, 0)
+	for rows.Next() {
+		var plan Plan
+		if err := rows.Scan(&plan.ID, &plan.Name, &plan.MaxActiveTunnels, &plan.MonthlyMinutes, &plan.MonthlyTransferBytes); err != nil {
+			return nil, fmt.Errorf("scan plan: %w", err)
+		}
+		plans = append(plans, plan)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate plans: %w", err)
+	}
+	return plans, nil
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (Authentication, error) {

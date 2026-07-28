@@ -60,6 +60,14 @@ export type AdminUser = {
 	last_login_at: string | null
 }
 
+export type Plan = {
+	id: number
+	name: string
+	max_active_tunnels: number | null
+	monthly_minutes: number | null
+	monthly_transfer_bytes: number | null
+}
+
 export type AdminUsersPage = {
 	users: AdminUser[]
 	next_cursor?: string
@@ -75,6 +83,14 @@ export type AdminUsersQuery = {
 
 export function listAdminUsers(query: AdminUsersQuery) {
 	return api.get<AdminUsersPage>('/api/v1/admin/users', { params: query })
+}
+
+export function listPlans() {
+	return api.get<Plan[]>('/api/v1/plans')
+}
+
+export function changeAdminUserPlan(userId: string, planId: number) {
+	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/plan`, { plan_id: planId })
 }
 
 export const deteteTunnel = deleteTunnel

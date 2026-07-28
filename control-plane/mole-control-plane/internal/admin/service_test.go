@@ -61,3 +61,56 @@ func TestListUsersRejectsInvalidQuery(t *testing.T) {
 		}
 	}
 }
+
+func TestChangeUserPlan(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM plans WHERE id = $1")).
+		WithArgs(int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(int64(2)))
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
+		WithArgs(int64(2), "user-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "username", "email", "plan", "is_admin",
+			"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
+		}).AddRow("user-1", "alice", "alice@example.com", "premium", false, 10, 20, createdAt, nil))
+	mock.ExpectCommit()
+
+	account, err := NewService(db).ChangeUserPlan(context.Background(), "user-1", 2)
+	if err != nil {
+		t.Fatalf("change user plan: %v", err)
+	}
+	if account.ID != "user-1" || account.Plan != "premium" || account.MonthlyMinutesUsed != 10 || account.MonthlyTransferBytes != 20 {
+		t.Fatalf("unexpected updated account: %+v", account)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
+func TestChangeUserPlanRejectsMissingPlan(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM plans WHERE id = $1")).
+		WithArgs(int64(99)).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	if _, err := NewService(db).ChangeUserPlan(context.Background(), "user-1", 99); err != ErrPlanNotFound {
+		t.Fatalf("expected ErrPlanNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}

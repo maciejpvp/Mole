@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useAdminUsers } from '../hooks/useAdminUsers'
 import type { AdminUsersQuery } from '../lib/api'
 import { errorMessage, formatBytes, formatDate } from '../utils'
+import { useWindowContext } from '../hooks/useWindowContext'
+import { createAdminUserDetailsWindow } from './AdminUserDetailsWindow'
 
 const pageSizes = [25, 50, 100]
 const sortOptions: Array<{ value: AdminUsersQuery['sort']; label: string }> = [
@@ -12,6 +14,7 @@ const sortOptions: Array<{ value: AdminUsersQuery['sort']; label: string }> = [
 ]
 
 export function AdminUsersWindow() {
+	const { addWindow } = useWindowContext()
 	const [searchInput, setSearchInput] = useState('')
 	const [query, setQuery] = useState<AdminUsersQuery>({
 		limit: 50,
@@ -111,7 +114,7 @@ export function AdminUsersWindow() {
 						<tbody>
 							{page.users.map((user) => (
 								<tr key={user.id} className="border-b border-[#20242d] hover:bg-[#1e222b]">
-									<td className="px-2 py-1 text-[#dcdcaa]">{user.username}</td>
+									<td className="px-2 py-1 text-[#dcdcaa]"><button type="button" onClick={() => addWindow(createAdminUserDetailsWindow(user))} className="text-left hover:text-[#9cdcfe] hover:underline">{user.username}</button></td>
 									<td className="px-2 py-1 text-[#b5cea8]">{user.email}</td>
 									<td className="px-2 py-1 text-[#9cdcfe]">{user.plan}</td>
 									<td className="px-2 py-1">{user.is_admin ? <span className="text-[#4ec9b0]">admin</span> : 'user'}</td>
