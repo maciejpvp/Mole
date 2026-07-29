@@ -101,7 +101,7 @@ export function ImGuiDesktop({ windows }: ImGuiDesktopProps) {
           layout: {
             ...window.layout,
             ...persistedState.current.layouts[window.id],
-            zIndex: persistedState.current.layouts[window.id]?.zIndex ?? topZIndex + index + 1,
+            zIndex: topZIndex + index + 1,
           },
         }))
       if (!additions.length && retained.length === current.length) return current
