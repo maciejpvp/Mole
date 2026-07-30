@@ -65,6 +65,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 		r.Get("/users", s.adminListUsersHandler)
 		r.Patch("/users/{userId}/plan", s.adminChangeUserPlanHandler)
 		r.Patch("/users/{userId}/admin", s.adminSetUserAdminHandler)
+		r.Patch("/users/{userId}/ban", s.adminSetUserBannedHandler)
 	})
 	r.Post("/api/v1/tunnels/connect", s.connectTunnelHandler)
 	r.Post("/internal/v1/tunnels/usage", s.syncTunnelUsageHandler)

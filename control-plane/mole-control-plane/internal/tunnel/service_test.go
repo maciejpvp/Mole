@@ -74,8 +74,8 @@ func TestCreateTunnelEnforcesMaxActiveTunnels(t *testing.T) {
 		WithArgs("test-user-id").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"max_active_tunnels", "monthly_minutes", "monthly_transfer_bytes",
-			"monthly_minutes_used", "monthly_transfer_bytes_used", "usage_period_started_at",
-		}).AddRow(1, nil, nil, 0, 0, time.Now()))
+			"monthly_minutes_used", "monthly_transfer_bytes_used", "usage_period_started_at", "is_banned",
+		}).AddRow(1, nil, nil, 0, 0, time.Now(), false))
 
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tunnels WHERE user_id = \$1 AND status IN \('inactive', 'active'\)`).
 		WithArgs("test-user-id").
@@ -114,8 +114,8 @@ func TestSetConnectionStatusEnforcesLimit(t *testing.T) {
 		WithArgs("test-user-id").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"max_active_tunnels", "monthly_minutes", "monthly_transfer_bytes",
-			"monthly_minutes_used", "monthly_transfer_bytes_used", "usage_period_started_at",
-		}).AddRow(1, nil, nil, 0, 0, time.Now()))
+			"monthly_minutes_used", "monthly_transfer_bytes_used", "usage_period_started_at", "is_banned",
+		}).AddRow(1, nil, nil, 0, 0, time.Now(), false))
 
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tunnels WHERE user_id = \$1 AND status = 'active'`).
 		WithArgs("test-user-id").

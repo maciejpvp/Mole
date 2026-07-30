@@ -37,9 +37,9 @@ func NewServer() *http.Server {
 		broker: NewBroker(),
 	}
 	NewServer.users = user.NewService(NewServer.db.DB())
-	NewServer.admin = admin.NewService(NewServer.db.DB())
 	provisioner, err := tunnel.NewHTTPProvisionerFromEnv()
 	NewServer.tunnels = tunnel.NewService(NewServer.db.DB(), provisioner)
+	NewServer.admin = admin.NewService(NewServer.db.DB(), provisioner)
 	NewServer.tunnelSetupErr = err
 
 	// Declare Server config

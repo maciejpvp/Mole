@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { AdminUser } from '../lib/api'
 import { useChangeAdminUserPlan } from '../hooks/useChangeAdminUserPlan'
 import { useSetAdminUserPermission } from '../hooks/useSetAdminUserPermission'
+import { useSetAdminUserBanned } from '../hooks/useSetAdminUserBanned'
 import { usePlans } from '../hooks/usePlans'
 import { errorMessage, formatBytes, formatDate } from '../utils'
 import type { WindowConfig } from '../types/window'
@@ -26,12 +27,14 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 	const plansQuery = usePlans()
 	const changePlan = useChangeAdminUserPlan()
 	const setAdminPermission = useSetAdminUserPermission()
+	const setBanned = useSetAdminUserBanned()
 	const currentPlan = useMemo(
 		() => plansQuery.data?.find((plan) => plan.name === account.plan),
 		[plansQuery.data, account.plan],
 	)
 	const [selectedPlanId, setSelectedPlanId] = useState<number | undefined>(currentPlan?.id)
 	const [selectedIsAdmin, setSelectedIsAdmin] = useState(account.is_admin)
+	const [selectedIsBanned, setSelectedIsBanned] = useState(account.is_banned)
 
 	useEffect(() => {
 		setSelectedPlanId(currentPlan?.id)
@@ -39,14 +42,16 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 
 	const planChanged = selectedPlanId !== undefined && selectedPlanId !== currentPlan?.id
 	const adminPermissionChanged = selectedIsAdmin !== account.is_admin
-	const isSaving = changePlan.isPending || setAdminPermission.isPending
-	const hasChanges = planChanged || adminPermissionChanged
+	const bannedChanged = selectedIsBanned !== account.is_banned
+	const isSaving = changePlan.isPending || setAdminPermission.isPending || setBanned.isPending
+	const hasChanges = planChanged || adminPermissionChanged || bannedChanged
 
 	const saveAccount = async () => {
 		if (!hasChanges || isSaving) return
 
 		changePlan.reset()
 		setAdminPermission.reset()
+		setBanned.reset()
 
 		try {
 			if (planChanged && selectedPlanId !== undefined) {
@@ -55,6 +60,10 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 			}
 			if (adminPermissionChanged) {
 				const updatedAccount = await setAdminPermission.mutateAsync({ userId: account.id, isAdmin: selectedIsAdmin })
+				setAccount(updatedAccount)
+			}
+			if (bannedChanged) {
+				const updatedAccount = await setBanned.mutateAsync({ userId: account.id, isBanned: selectedIsBanned })
 				setAccount(updatedAccount)
 			}
 		} catch {
@@ -93,7 +102,19 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 			</div>
 
 			<div className="space-y-2 border-t border-[#2b2f3a] pt-3">
-				<PlaceholderSelect id={`admin-user-banned-${account.id}`} label="BANNED" />
+				<div className="grid grid-cols-[120px_1fr] items-center gap-2">
+					<label className="text-[#569cd6]" htmlFor={`admin-user-banned-${account.id}`}>BANNED</label>
+					<select
+						id={`admin-user-banned-${account.id}`}
+						value={selectedIsBanned ? 'yes' : 'no'}
+						onChange={(event) => setSelectedIsBanned(event.target.value === 'yes')}
+						disabled={isSaving}
+						className="w-fit border border-[#404859] bg-[#0f1115] px-2 py-1 text-[#d4d4d4] disabled:opacity-50"
+					>
+						<option value="yes">YES</option>
+						<option value="no">NO</option>
+					</select>
+				</div>
 				<div className="grid grid-cols-[120px_1fr] items-center gap-2">
 					<label className="text-[#569cd6]" htmlFor={`admin-user-is-admin-${account.id}`}>IS ADMIN</label>
 					<select
@@ -112,7 +133,8 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 			</div>
 
 			{setAdminPermission.isError ? <StatusMessage tone="error">{errorMessage(setAdminPermission.error, 'Unable to update administrator permission')}</StatusMessage> : null}
-			{!changePlan.isError && !setAdminPermission.isError && (changePlan.isSuccess || setAdminPermission.isSuccess) ? <StatusMessage tone="success">Account updated.</StatusMessage> : null}
+			{setBanned.isError ? <StatusMessage tone="error">{errorMessage(setBanned.error, 'Unable to update ban status')}</StatusMessage> : null}
+			{!changePlan.isError && !setAdminPermission.isError && !setBanned.isError && (changePlan.isSuccess || setAdminPermission.isSuccess || setBanned.isSuccess) ? <StatusMessage tone="success">Account updated.</StatusMessage> : null}
 			<div className="mt-auto flex justify-end pt-2">
 				<button
 					type="button"
@@ -129,18 +151,6 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 
 function ReadonlyField({ label, value }: { label: string; value: string }) {
 	return <><span className="text-[#569cd6]">{label}</span><span className="truncate text-[#d4d4d4]">{value}</span></>
-}
-
-function PlaceholderSelect({ id, label }: { id: string; label: string }) {
-	return (
-		<div className="grid grid-cols-[120px_1fr] items-center gap-2">
-			<label className="text-[#569cd6]" htmlFor={id}>{label}</label>
-			<select id={id} defaultValue="no" disabled className="w-fit border border-[#404859] bg-[#0f1115] px-2 py-1 text-[#808080] disabled:opacity-60">
-				<option value="no">no</option>
-				<option value="yes">yes</option>
-			</select>
-		</div>
-	)
 }
 
 function StatusMessage({ children, tone }: { children: string; tone: 'error' | 'success' }) {

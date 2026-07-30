@@ -57,6 +57,7 @@ type User struct {
 	Email    string `json:"email"`
 	Plan     string `json:"plan"`
 	IsAdmin  bool   `json:"-"`
+	IsBanned bool   `json:"-"`
 }
 
 // Profile is the authenticated user's account snapshot. It intentionally
@@ -210,13 +211,13 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (Authentication, 
 	)
 	err = tx.QueryRowContext(ctx, `
 		SELECT users.id, users.username, users.email, users.password_hash, plans.name,
-			users.failed_login_attempts, users.locked_until
+			users.failed_login_attempts, users.locked_until, users.is_banned
 		FROM users
 		JOIN plans ON plans.id = users.plan_id
 		WHERE users.username = $1 OR users.email = $1
 		FOR UPDATE`, identifier).Scan(
 		&account.ID, &account.Username, &account.Email, &passwordHash, &account.Plan,
-		&failedAttempts, &lockedUntil,
+		&failedAttempts, &lockedUntil, &account.IsBanned,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Keep the cost of an unknown account login comparable to a real login.
@@ -225,6 +226,9 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (Authentication, 
 	}
 	if err != nil {
 		return Authentication{}, fmt.Errorf("find account: %w", err)
+	}
+	if account.IsBanned {
+		return Authentication{}, ErrInvalidCredentials
 	}
 
 	now := s.now().UTC()
@@ -275,18 +279,21 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 	tokenHash := sha256.Sum256([]byte(token))
 	var account User
 	err := s.db.QueryRowContext(ctx, `
-		SELECT users.id, users.username, users.email, plans.name, users.is_admin
+		SELECT users.id, users.username, users.email, plans.name, users.is_admin, users.is_banned
 		FROM sessions
 		JOIN users ON users.id = sessions.user_id
 		JOIN plans ON plans.id = users.plan_id
 		WHERE sessions.token_hash = $1 AND sessions.expires_at > CURRENT_TIMESTAMP`, tokenHash[:]).Scan(
-		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrUnauthenticated
 	}
 	if err != nil {
 		return User{}, fmt.Errorf("authenticate session: %w", err)
+	}
+	if account.IsBanned {
+		return User{}, ErrUnauthenticated
 	}
 	_, _ = s.db.ExecContext(ctx, "UPDATE sessions SET last_used_at = CURRENT_TIMESTAMP WHERE token_hash = $1", tokenHash[:])
 	return account, nil

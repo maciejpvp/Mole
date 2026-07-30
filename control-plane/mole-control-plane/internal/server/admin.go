@@ -18,6 +18,10 @@ type setUserAdminRequest struct {
 	IsAdmin *bool `json:"is_admin"`
 }
 
+type setUserBannedRequest struct {
+	IsBanned *bool `json:"is_banned"`
+}
+
 func (s *Server) adminListUsersHandler(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseAdminLimit(r.URL.Query().Get("limit"))
 	if err != nil {
@@ -92,6 +96,40 @@ func (s *Server) adminSetUserAdminHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) adminSetUserBannedHandler(w http.ResponseWriter, r *http.Request) {
+	var request setUserBannedRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		return
+	}
+	if request.IsBanned == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "is_banned is required"})
+		return
+	}
+
+	account, err := s.admin.SetUserBanned(r.Context(), chi.URLParam(r, "userId"), *request.IsBanned)
+	if err != nil {
+		switch {
+		case errors.Is(err, admin.ErrInvalidInput):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
+		case errors.Is(err, admin.ErrUserNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, admin.ErrUnavailable), errors.Is(err, admin.ErrTunnelCleanup):
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "unable to remove user tunnels"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to update user ban status"})
+		}
+		return
+	}
+
+	if *request.IsBanned && s.broker != nil {
+		s.broker.Broadcast(account.ID, Event{
+			Name: "user_banned",
+			Data: map[string]bool{"is_banned": true},
+		})
+	}
 	writeJSON(w, http.StatusOK, account)
 }
 

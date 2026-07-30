@@ -22,6 +22,7 @@ var (
 	ErrLimitReached = errors.New("plan limit reached")
 	ErrUnavailable  = errors.New("tunnel server unavailable")
 	ErrNotFound     = errors.New("tunnel not found")
+	ErrUserBanned   = errors.New("user is banned")
 )
 
 // Provisioner allocates and releases public listeners on a tunnel server.
@@ -343,6 +344,7 @@ func (s *Service) ApplyUsage(ctx context.Context, updates []UsageUpdate) (UsageS
 }
 
 type userLimits struct {
+	isBanned             bool
 	monthlyMinutesLimit  sql.NullInt64
 	monthlyTransferLimit sql.NullInt64
 	maxActiveTunnels     sql.NullInt64
@@ -423,16 +425,20 @@ func lockAndRefreshUserUsage(ctx context.Context, tx *sql.Tx, userID string, now
 	)
 	err := tx.QueryRowContext(ctx, `
 		SELECT plans.max_active_tunnels, plans.monthly_minutes, plans.monthly_transfer_bytes,
-			users.monthly_minutes_used, users.monthly_transfer_bytes_used, users.usage_period_started_at
+			users.monthly_minutes_used, users.monthly_transfer_bytes_used, users.usage_period_started_at,
+			users.is_banned
 		FROM users
 		JOIN plans ON plans.id = users.plan_id
 		WHERE users.id = $1
 		FOR UPDATE OF users`, userID).Scan(
 		&limits.maxActiveTunnels, &limits.monthlyMinutesLimit, &limits.monthlyTransferLimit,
-		&limits.monthlyMinutesUsed, &limits.monthlyTransferUsed, &periodStart,
+		&limits.monthlyMinutesUsed, &limits.monthlyTransferUsed, &periodStart, &limits.isBanned,
 	)
 	if err != nil {
 		return userLimits{}, fmt.Errorf("lock user usage: %w", err)
+	}
+	if limits.isBanned {
+		return userLimits{}, ErrUserBanned
 	}
 	if !now.Before(periodStart.AddDate(0, 1, 0)) {
 		if _, err := tx.ExecContext(ctx, `

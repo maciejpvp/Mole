@@ -3,12 +3,23 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"regexp"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+type testDeprovisioner struct {
+	ids []string
+	err error
+}
+
+func (d *testDeprovisioner) Deprovision(_ context.Context, tunnelID string) error {
+	d.ids = append(d.ids, tunnelID)
+	return d.err
+}
 
 func TestListUsersUsesCursorPagination(t *testing.T) {
 	db, mock, err := sqlmock.New()
@@ -21,10 +32,10 @@ func TestListUsersUsesCursorPagination(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT users.id")).
 		WithArgs(int64(2)).
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "username", "email", "plan", "is_admin",
+			"id", "username", "email", "plan", "is_admin", "is_banned",
 			"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
-		}).AddRow("user-1", "alice", "alice@example.com", "free", false, 10, 20, createdAt, nil).
-			AddRow("user-2", "bob", "bob@example.com", "premium", true, 30, 40, createdAt, nil))
+		}).AddRow("user-1", "alice", "alice@example.com", "free", false, false, 10, 20, createdAt, nil).
+			AddRow("user-2", "bob", "bob@example.com", "premium", true, false, 30, 40, createdAt, nil))
 
 	page, err := NewService(db).ListUsers(context.Background(), ListUsersInput{
 		Limit:     1,
@@ -77,9 +88,9 @@ func TestChangeUserPlan(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
 		WithArgs(int64(2), "user-1").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "username", "email", "plan", "is_admin",
+			"id", "username", "email", "plan", "is_admin", "is_banned",
 			"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
-		}).AddRow("user-1", "alice", "alice@example.com", "premium", false, 10, 20, createdAt, nil))
+		}).AddRow("user-1", "alice", "alice@example.com", "premium", false, false, 10, 20, createdAt, nil))
 	mock.ExpectCommit()
 
 	account, err := NewService(db).ChangeUserPlan(context.Background(), "user-1", 2)
@@ -126,9 +137,9 @@ func TestSetUserAdmin(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
 		WithArgs(true, "user-1").
 		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "username", "email", "plan", "is_admin",
+			"id", "username", "email", "plan", "is_admin", "is_banned",
 			"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
-		}).AddRow("user-1", "alice", "alice@example.com", "premium", true, 10, 20, createdAt, nil))
+		}).AddRow("user-1", "alice", "alice@example.com", "premium", true, false, 10, 20, createdAt, nil))
 
 	account, err := NewService(db).SetUserAdmin(context.Background(), "user-1", true)
 	if err != nil {
@@ -155,6 +166,63 @@ func TestSetUserAdminRejectsMissingUser(t *testing.T) {
 
 	if _, err := NewService(db).SetUserAdmin(context.Background(), "user-1", false); err != ErrUserNotFound {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
+func TestSetUserBannedRemovesTunnelsBeforeCommit(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	deprovisioner := &testDeprovisioner{}
+	createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM users WHERE id = $1 FOR UPDATE")).
+		WithArgs("user-1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-1"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM tunnels WHERE user_id = $1 FOR UPDATE")).
+		WithArgs("user-1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tunnel-1").AddRow("tunnel-2"))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM tunnels WHERE user_id = $1")).WithArgs("user-1").WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
+		WithArgs(true, "user-1").WillReturnRows(sqlmock.NewRows([]string{
+		"id", "username", "email", "plan", "is_admin", "is_banned",
+		"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
+	}).AddRow("user-1", "alice", "alice@example.com", "free", false, true, 0, 0, createdAt, nil))
+	mock.ExpectCommit()
+
+	account, err := NewService(db, deprovisioner).SetUserBanned(context.Background(), "user-1", true)
+	if err != nil {
+		t.Fatalf("set user banned: %v", err)
+	}
+	if !account.IsBanned || len(deprovisioner.ids) != 2 || deprovisioner.ids[0] != "tunnel-1" || deprovisioner.ids[1] != "tunnel-2" {
+		t.Fatalf("unexpected ban result: %+v, deprovisioned=%v", account, deprovisioner.ids)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
+func TestSetUserBannedRollsBackWhenTunnelCleanupFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM users WHERE id = $1 FOR UPDATE")).
+		WithArgs("user-1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("user-1"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM tunnels WHERE user_id = $1 FOR UPDATE")).
+		WithArgs("user-1").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("tunnel-1"))
+	mock.ExpectRollback()
+
+	_, err = NewService(db, &testDeprovisioner{err: errors.New("relay unavailable")}).SetUserBanned(context.Background(), "user-1", true)
+	if !errors.Is(err, ErrTunnelCleanup) {
+		t.Fatalf("expected tunnel cleanup error, got %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("mock expectations: %v", err)

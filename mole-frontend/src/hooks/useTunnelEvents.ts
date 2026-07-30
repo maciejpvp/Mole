@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { userQueryKey } from './useUser'
 import type { UserProfile } from '../lib/auth'
+import { useAuthSession } from '../auth/authSessionContext'
 
 const controlPlaneUrl = import.meta.env.VITE_CONTROL_PLANE_URL !== undefined
   ? import.meta.env.VITE_CONTROL_PLANE_URL
@@ -9,6 +10,7 @@ const controlPlaneUrl = import.meta.env.VITE_CONTROL_PLANE_URL !== undefined
 
 export function useTunnelEvents(accessToken: string | null) {
   const queryClient = useQueryClient()
+  const { setSessionAccessToken } = useAuthSession()
   const [isConnected, setIsConnected] = useState(false)
 
   useEffect(() => {
@@ -37,16 +39,24 @@ export function useTunnelEvents(accessToken: string | null) {
 
     eventSource.addEventListener('tunnel_update', handleUpdate)
 
+    const handleBanned = () => {
+      setSessionAccessToken(null)
+      queryClient.removeQueries({ queryKey: userQueryKey })
+    }
+
+    eventSource.addEventListener('user_banned', handleBanned)
+
     eventSource.onerror = () => {
       setIsConnected(false)
     }
 
     return () => {
       eventSource.removeEventListener('tunnel_update', handleUpdate)
+      eventSource.removeEventListener('user_banned', handleBanned)
       eventSource.close()
       setIsConnected(false)
     }
-  }, [accessToken, queryClient])
+  }, [accessToken, queryClient, setSessionAccessToken])
 
   return { isConnected }
 }

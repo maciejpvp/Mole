@@ -54,6 +54,7 @@ export type AdminUser = {
 	email: string
 	plan: string
 	is_admin: boolean
+	is_banned: boolean
 	monthly_minutes_used: number
 	monthly_transfer_bytes_used: number
 	created_at: string
@@ -95,6 +96,10 @@ export function changeAdminUserPlan(userId: string, planId: number) {
 
 export function setAdminUserPermission(userId: string, isAdmin: boolean) {
 	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/admin`, { is_admin: isAdmin })
+}
+
+export function setAdminUserBanned(userId: string, isBanned: boolean) {
+	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/ban`, { is_banned: isBanned })
 }
 
 export const deteteTunnel = deleteTunnel

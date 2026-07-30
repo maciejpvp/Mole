@@ -14,9 +14,11 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("invalid admin query")
-	ErrUserNotFound = errors.New("user not found")
-	ErrPlanNotFound = errors.New("plan not found")
+	ErrInvalidInput  = errors.New("invalid admin query")
+	ErrUserNotFound  = errors.New("user not found")
+	ErrPlanNotFound  = errors.New("plan not found")
+	ErrTunnelCleanup = errors.New("unable to remove user tunnels")
+	ErrUnavailable   = errors.New("tunnel provisioner unavailable")
 )
 
 const (
@@ -24,7 +26,14 @@ const (
 	maxPageSize     = 100
 )
 
-type Service struct{ db *sql.DB }
+type TunnelDeprovisioner interface {
+	Deprovision(context.Context, string) error
+}
+
+type Service struct {
+	db            *sql.DB
+	deprovisioner TunnelDeprovisioner
+}
 
 type SortField string
 
@@ -56,6 +65,7 @@ type User struct {
 	Email                string     `json:"email"`
 	Plan                 string     `json:"plan"`
 	IsAdmin              bool       `json:"is_admin"`
+	IsBanned             bool       `json:"is_banned"`
 	MonthlyMinutesUsed   int64      `json:"monthly_minutes_used"`
 	MonthlyTransferBytes int64      `json:"monthly_transfer_bytes_used"`
 	CreatedAt            time.Time  `json:"created_at"`
@@ -72,7 +82,13 @@ type cursor struct {
 	ID    string `json:"id"`
 }
 
-func NewService(db *sql.DB) *Service { return &Service{db: db} }
+func NewService(db *sql.DB, deprovisioners ...TunnelDeprovisioner) *Service {
+	service := &Service{db: db}
+	if len(deprovisioners) > 0 {
+		service.deprovisioner = deprovisioners[0]
+	}
+	return service
+}
 
 func (s *Service) ListUsers(ctx context.Context, input ListUsersInput) (UserPage, error) {
 	if s == nil || s.db == nil {
@@ -112,7 +128,7 @@ func (s *Service) ListUsers(ctx context.Context, input ListUsersInput) (UserPage
 	}
 
 	query := `
-		SELECT users.id, users.username, users.email, plans.name, users.is_admin,
+		SELECT users.id, users.username, users.email, plans.name, users.is_admin, users.is_banned,
 			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
 			users.created_at, users.last_login_at
 		FROM users
@@ -162,7 +178,7 @@ func (s *Service) ListUsers(ctx context.Context, input ListUsersInput) (UserPage
 	for rows.Next() {
 		var account User
 		if err := rows.Scan(
-			&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
+			&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned,
 			&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
 			&account.CreatedAt, &account.LastLoginAt,
 		); err != nil {
@@ -210,10 +226,10 @@ func (s *Service) ChangeUserPlan(ctx context.Context, userID string, planID int6
 		SET plan_id = $1
 		WHERE id = $2
 		RETURNING users.id, users.username, users.email,
-			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin,
+			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin, users.is_banned,
 			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
 			users.created_at, users.last_login_at`, planID, userID).Scan(
-		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned,
 		&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
 		&account.CreatedAt, &account.LastLoginAt,
 	)
@@ -225,6 +241,85 @@ func (s *Service) ChangeUserPlan(ctx context.Context, userID string, planID int6
 	}
 	if err := tx.Commit(); err != nil {
 		return User{}, fmt.Errorf("commit user plan change: %w", err)
+	}
+	return account, nil
+}
+
+// SetUserBanned updates a user's ban state. When banning, all relay listeners
+// and tunnel records are removed before the transaction is committed.
+func (s *Service) SetUserBanned(ctx context.Context, userID string, isBanned bool) (User, error) {
+	if s == nil || s.db == nil {
+		return User{}, errors.New("admin database unavailable")
+	}
+	if strings.TrimSpace(userID) == "" {
+		return User{}, ErrInvalidInput
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("begin set user ban: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var existingID string
+	if err := tx.QueryRowContext(ctx, "SELECT id FROM users WHERE id = $1 FOR UPDATE", userID).Scan(&existingID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, ErrUserNotFound
+		}
+		return User{}, fmt.Errorf("find user for ban: %w", err)
+	}
+
+	if isBanned {
+		rows, err := tx.QueryContext(ctx, "SELECT id FROM tunnels WHERE user_id = $1 FOR UPDATE", userID)
+		if err != nil {
+			return User{}, fmt.Errorf("list user tunnels for ban: %w", err)
+		}
+		tunnelIDs := make([]string, 0)
+		for rows.Next() {
+			var tunnelID string
+			if err := rows.Scan(&tunnelID); err != nil {
+				rows.Close()
+				return User{}, fmt.Errorf("read user tunnel for ban: %w", err)
+			}
+			tunnelIDs = append(tunnelIDs, tunnelID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return User{}, fmt.Errorf("iterate user tunnels for ban: %w", err)
+		}
+		rows.Close()
+
+		if len(tunnelIDs) > 0 && s.deprovisioner == nil {
+			return User{}, ErrUnavailable
+		}
+		for _, tunnelID := range tunnelIDs {
+			if err := s.deprovisioner.Deprovision(ctx, tunnelID); err != nil {
+				return User{}, fmt.Errorf("%w: %v", ErrTunnelCleanup, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM tunnels WHERE user_id = $1", userID); err != nil {
+			return User{}, fmt.Errorf("delete user tunnels for ban: %w", err)
+		}
+	}
+
+	var account User
+	err = tx.QueryRowContext(ctx, `
+		UPDATE users
+		SET is_banned = $1
+		WHERE id = $2
+		RETURNING users.id, users.username, users.email,
+			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin, users.is_banned,
+			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
+			users.created_at, users.last_login_at`, isBanned, userID).Scan(
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned,
+		&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
+		&account.CreatedAt, &account.LastLoginAt,
+	)
+	if err != nil {
+		return User{}, fmt.Errorf("set user ban: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("commit user ban: %w", err)
 	}
 	return account, nil
 }
@@ -245,10 +340,10 @@ func (s *Service) SetUserAdmin(ctx context.Context, userID string, isAdmin bool)
 		SET is_admin = $1
 		WHERE id = $2
 		RETURNING users.id, users.username, users.email,
-			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin,
+			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin, users.is_banned,
 			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
 			users.created_at, users.last_login_at`, isAdmin, userID).Scan(
-		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned,
 		&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
 		&account.CreatedAt, &account.LastLoginAt,
 	)
