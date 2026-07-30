@@ -93,6 +93,10 @@ export function changeAdminUserPlan(userId: string, planId: number) {
 	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/plan`, { plan_id: planId })
 }
 
+export function setAdminUserPermission(userId: string, isAdmin: boolean) {
+	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/admin`, { is_admin: isAdmin })
+}
+
 export const deteteTunnel = deleteTunnel
 
 const savedToken = getAccessToken()

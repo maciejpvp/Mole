@@ -114,3 +114,49 @@ func TestChangeUserPlanRejectsMissingPlan(t *testing.T) {
 		t.Fatalf("mock expectations: %v", err)
 	}
 }
+
+func TestSetUserAdmin(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
+		WithArgs(true, "user-1").
+		WillReturnRows(sqlmock.NewRows([]string{
+			"id", "username", "email", "plan", "is_admin",
+			"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
+		}).AddRow("user-1", "alice", "alice@example.com", "premium", true, 10, 20, createdAt, nil))
+
+	account, err := NewService(db).SetUserAdmin(context.Background(), "user-1", true)
+	if err != nil {
+		t.Fatalf("set user admin permission: %v", err)
+	}
+	if account.ID != "user-1" || !account.IsAdmin {
+		t.Fatalf("unexpected updated account: %+v", account)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
+func TestSetUserAdminRejectsMissingUser(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
+		WithArgs(false, "user-1").
+		WillReturnError(sql.ErrNoRows)
+
+	if _, err := NewService(db).SetUserAdmin(context.Background(), "user-1", false); err != ErrUserNotFound {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}

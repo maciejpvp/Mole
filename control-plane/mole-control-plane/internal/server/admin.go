@@ -14,6 +14,10 @@ type changeUserPlanRequest struct {
 	PlanID int64 `json:"plan_id"`
 }
 
+type setUserAdminRequest struct {
+	IsAdmin *bool `json:"is_admin"`
+}
+
 func (s *Server) adminListUsersHandler(w http.ResponseWriter, r *http.Request) {
 	limit, err := parseAdminLimit(r.URL.Query().Get("limit"))
 	if err != nil {
@@ -58,6 +62,32 @@ func (s *Server) adminChangeUserPlanHandler(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		default:
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to change user plan"})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (s *Server) adminSetUserAdminHandler(w http.ResponseWriter, r *http.Request) {
+	var request setUserAdminRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		return
+	}
+	if request.IsAdmin == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "is_admin is required"})
+		return
+	}
+
+	account, err := s.admin.SetUserAdmin(r.Context(), chi.URLParam(r, "userId"), *request.IsAdmin)
+	if err != nil {
+		switch {
+		case errors.Is(err, admin.ErrInvalidInput):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
+		case errors.Is(err, admin.ErrUserNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to update user administrator permission"})
 		}
 		return
 	}

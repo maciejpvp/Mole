@@ -229,6 +229,38 @@ func (s *Service) ChangeUserPlan(ctx context.Context, userID string, planID int6
 	return account, nil
 }
 
+// SetUserAdmin updates a user's administrator permission and returns the
+// updated user summary.
+func (s *Service) SetUserAdmin(ctx context.Context, userID string, isAdmin bool) (User, error) {
+	if s == nil || s.db == nil {
+		return User{}, errors.New("admin database unavailable")
+	}
+	if strings.TrimSpace(userID) == "" {
+		return User{}, ErrInvalidInput
+	}
+
+	var account User
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE users
+		SET is_admin = $1
+		WHERE id = $2
+		RETURNING users.id, users.username, users.email,
+			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin,
+			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
+			users.created_at, users.last_login_at`, isAdmin, userID).Scan(
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin,
+		&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
+		&account.CreatedAt, &account.LastLoginAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("set user admin permission: %w", err)
+	}
+	return account, nil
+}
+
 func typedCursorValue(value string, field SortField) (any, error) {
 	switch field {
 	case SortByTransfer, SortByMinutes:

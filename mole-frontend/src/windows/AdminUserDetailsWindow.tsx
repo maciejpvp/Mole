@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { AdminUser } from '../lib/api'
 import { useChangeAdminUserPlan } from '../hooks/useChangeAdminUserPlan'
+import { useSetAdminUserPermission } from '../hooks/useSetAdminUserPermission'
 import { usePlans } from '../hooks/usePlans'
 import { errorMessage, formatBytes, formatDate } from '../utils'
 import type { WindowConfig } from '../types/window'
@@ -24,26 +25,46 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 	const [account, setAccount] = useState(user)
 	const plansQuery = usePlans()
 	const changePlan = useChangeAdminUserPlan()
+	const setAdminPermission = useSetAdminUserPermission()
 	const currentPlan = useMemo(
 		() => plansQuery.data?.find((plan) => plan.name === account.plan),
 		[plansQuery.data, account.plan],
 	)
 	const [selectedPlanId, setSelectedPlanId] = useState<number | undefined>(currentPlan?.id)
+	const [selectedIsAdmin, setSelectedIsAdmin] = useState(account.is_admin)
 
 	useEffect(() => {
 		setSelectedPlanId(currentPlan?.id)
 	}, [currentPlan?.id])
 
-	const savePlan = () => {
-		if (selectedPlanId === undefined || selectedPlanId === currentPlan?.id) return
-		changePlan.mutate(
-			{ userId: account.id, planId: selectedPlanId },
-			{ onSuccess: (updatedAccount) => setAccount(updatedAccount) },
-		)
+	const planChanged = selectedPlanId !== undefined && selectedPlanId !== currentPlan?.id
+	const adminPermissionChanged = selectedIsAdmin !== account.is_admin
+	const isSaving = changePlan.isPending || setAdminPermission.isPending
+	const hasChanges = planChanged || adminPermissionChanged
+
+	const saveAccount = async () => {
+		if (!hasChanges || isSaving) return
+
+		changePlan.reset()
+		setAdminPermission.reset()
+
+		try {
+			if (planChanged && selectedPlanId !== undefined) {
+				const updatedAccount = await changePlan.mutateAsync({ userId: account.id, planId: selectedPlanId })
+				setAccount(updatedAccount)
+			}
+			if (adminPermissionChanged) {
+				const updatedAccount = await setAdminPermission.mutateAsync({ userId: account.id, isAdmin: selectedIsAdmin })
+				setAccount(updatedAccount)
+			}
+		} catch {
+			// The mutation status below describes the failed request. Any earlier
+			// successful change remains persisted and is reflected in local state.
+		}
 	}
 
 	return (
-		<div className="space-y-3 font-mono text-[12px] leading-5 text-[#c5c5c5]">
+		<div className="flex min-h-full flex-col space-y-3 font-mono text-[12px] leading-5 text-[#c5c5c5]">
 			<div className="grid grid-cols-[minmax(120px,auto)_1fr] gap-x-4 gap-y-1 border-b border-[#2b2f3a] pb-3">
 				<ReadonlyField label="USERNAME" value={account.username} />
 				<ReadonlyField label="EMAIL" value={account.email} />
@@ -54,40 +75,53 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 			</div>
 
 			<div className="space-y-2">
-				<div className="grid grid-cols-[120px_1fr_auto] items-center gap-2">
+				<div className="grid grid-cols-[120px_1fr] items-center gap-2">
 					<label className="text-[#569cd6]" htmlFor={`admin-user-plan-${account.id}`}>PLAN</label>
 					<select
 						id={`admin-user-plan-${account.id}`}
 						value={selectedPlanId ?? ''}
 						onChange={(event) => setSelectedPlanId(event.target.value ? Number(event.target.value) : undefined)}
-						disabled={plansQuery.isLoading || plansQuery.isError || changePlan.isPending}
+						disabled={plansQuery.isLoading || plansQuery.isError || isSaving}
 						className="border border-[#404859] bg-[#0f1115] px-2 py-1 text-[#d4d4d4] disabled:opacity-50"
 					>
 						<option value="">{plansQuery.isLoading ? 'Loading plans…' : 'Select plan'}</option>
 						{plansQuery.data?.map((plan) => <option key={plan.id} value={plan.id}>{plan.name}</option>)}
 					</select>
-					<button
-						type="button"
-						onClick={savePlan}
-						disabled={selectedPlanId === undefined || selectedPlanId === currentPlan?.id || changePlan.isPending}
-						className="border border-[#404859] px-2 py-1 text-[#4ec9b0] hover:bg-[#2b2f3a] disabled:opacity-40"
-					>
-						{changePlan.isPending ? '[ saving… ]' : '[ save ]'}
-					</button>
 				</div>
 				{plansQuery.isError ? <StatusMessage tone="error">{errorMessage(plansQuery.error, 'Unable to load plans')}</StatusMessage> : null}
 				{changePlan.isError ? <StatusMessage tone="error">{errorMessage(changePlan.error, 'Unable to change plan')}</StatusMessage> : null}
-				{changePlan.isSuccess ? <StatusMessage tone="success">Plan updated. Refresh the user list to see the new value.</StatusMessage> : null}
 			</div>
 
 			<div className="space-y-2 border-t border-[#2b2f3a] pt-3">
 				<PlaceholderSelect id={`admin-user-banned-${account.id}`} label="BANNED" />
 				<div className="grid grid-cols-[120px_1fr] items-center gap-2">
-					<span className="text-[#569cd6]">IS ADMIN</span>
-					<span className={account.is_admin ? 'text-[#4ec9b0]' : 'text-[#c5c5c5]'}>{account.is_admin ? 'yes' : 'no'} <span className="text-[#808080]">(read-only placeholder)</span></span>
+					<label className="text-[#569cd6]" htmlFor={`admin-user-is-admin-${account.id}`}>IS ADMIN</label>
+					<select
+						id={`admin-user-is-admin-${account.id}`}
+						value={selectedIsAdmin ? 'yes' : 'no'}
+						onChange={(event) => setSelectedIsAdmin(event.target.value === 'yes')}
+						disabled={isSaving}
+						className="w-fit border border-[#404859] bg-[#0f1115] px-2 py-1 text-[#d4d4d4] disabled:opacity-50"
+					>
+						<option value="yes">YES</option>
+						<option value="no">NO</option>
+					</select>
 				</div>
 				<button type="button" disabled className="border border-[#404859] px-2 py-1 text-[#808080] disabled:opacity-60">[ reset usage limits ]</button>
 				<div className="text-[#808080]">// account actions are not available yet</div>
+			</div>
+
+			{setAdminPermission.isError ? <StatusMessage tone="error">{errorMessage(setAdminPermission.error, 'Unable to update administrator permission')}</StatusMessage> : null}
+			{!changePlan.isError && !setAdminPermission.isError && (changePlan.isSuccess || setAdminPermission.isSuccess) ? <StatusMessage tone="success">Account updated.</StatusMessage> : null}
+			<div className="mt-auto flex justify-end pt-2">
+				<button
+					type="button"
+					onClick={() => void saveAccount()}
+					disabled={!hasChanges || isSaving}
+					className="border border-[#404859] px-2 py-1 text-[#4ec9b0] hover:bg-[#2b2f3a] disabled:opacity-40"
+				>
+					{isSaving ? '[ saving… ]' : '[ save ]'}
+				</button>
 			</div>
 		</div>
 	)
