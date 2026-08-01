@@ -46,8 +46,9 @@ func (s *Server) RegisterRoutes() http.Handler {
 
 	r.Route("/api/v1/auth", func(r chi.Router) {
 		r.Use(authLimiter.Handler)
-		r.Post("/register", s.registerHandler)
-		r.Post("/login", s.loginHandler)
+		r.Get("/google/start", s.googleStartHandler)
+		r.Get("/google/callback", s.googleCallbackHandler)
+		r.Post("/google/exchange", s.googleExchangeHandler)
 	})
 
 	r.Group(func(r chi.Router) {

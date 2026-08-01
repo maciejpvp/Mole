@@ -1,57 +1,40 @@
-import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ImGuiButton, ImGuiInputString } from '../components/imgui'
+import { useEffect, useState } from 'react'
+import { ImGuiButton } from '../components/imgui'
 import { useAuthSession } from '../auth/authSessionContext'
 import { useUser, userQueryKey } from '../hooks/useUser'
-import { login, register } from '../lib/auth'
+import { exchangeGoogleLogin, getGoogleLoginUrl } from '../lib/auth'
 import { errorMessage } from '../utils'
-
-type AuthFormData = {
-  email: string
-  username: string
-  password: string
-}
-
-const emptyForm: AuthFormData = {
-  email: '',
-  username: '',
-  password: '',
-}
+import { useQueryClient } from '@tanstack/react-query'
 
 export function AuthWindow() {
-  const [mode, setMode] = useState<'login' | 'register'>('login')
-  const [formData, setFormData] = useState<AuthFormData>(emptyForm)
   const { accessToken, setSessionAccessToken } = useAuthSession()
   const queryClient = useQueryClient()
-
-  const registerMode = mode === 'register'
   const userQuery = useUser(accessToken)
-  const updateField = (field: keyof AuthFormData) => (value: string) => {
-    setFormData((current) => ({ ...current, [field]: value }))
-  }
-  const authMutation = useMutation({
-    mutationFn: () => registerMode
-      ? register(formData)
-      : login({ identifier: formData.username, password: formData.password }),
-    onSuccess: (authentication) => {
-      setSessionAccessToken(authentication.access_token)
-      void queryClient.invalidateQueries({ queryKey: userQueryKey })
-    },
-  })
+  const [googleStatus, setGoogleStatus] = useState('')
 
-  const status = authMutation.isPending
-    ? registerMode ? 'Creating account…' : 'Signing in…'
-    : authMutation.error
-      ? errorMessage(authMutation.error, 'Authentication request failed')
-      : userQuery.error
-        ? 'Your saved session has expired. Please sign in again.'
-        : ''
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, ''))
+    const code = params.get('google_code')
+    const error = params.get('google_error')
+    if (!code && !error) return
 
-  const switchMode = () => {
-    const nextMode = mode === 'login' ? 'register' : 'login'
-    setMode(nextMode)
-    authMutation.reset()
-  }
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+    if (error) {
+      setGoogleStatus('Google sign-in was cancelled or failed.')
+      return
+    }
+
+    setGoogleStatus('Signing in with Google…')
+    void exchangeGoogleLogin(code as string)
+      .then((authentication) => {
+        setSessionAccessToken(authentication.access_token)
+        void queryClient.invalidateQueries({ queryKey: userQueryKey })
+        setGoogleStatus('')
+      })
+      .catch((requestError: unknown) => {
+        setGoogleStatus(errorMessage(requestError, 'Google sign-in failed'))
+      })
+  }, [queryClient, setSessionAccessToken])
 
   const logout = () => {
     setSessionAccessToken(null)
@@ -73,35 +56,13 @@ export function AuthWindow() {
 
   return (
     <div className="space-y-3">
-      {registerMode && (
-        <ImGuiInputString
-          value={formData.email}
-          onChange={updateField('email')}
-          label="email"
-          ariaLabel="Email"
-          type="email"
-        />
+      <ImGuiButton onClick={() => window.location.assign(getGoogleLoginUrl())}>
+        Continue with Google
+      </ImGuiButton>
+      {googleStatus && <span className="text-[14px] text-[#9ab4d2]">{googleStatus}</span>}
+      {userQuery.error && !googleStatus && (
+        <span className="text-[14px] text-[#9ab4d2]">Your saved session has expired. Please sign in again.</span>
       )}
-      <ImGuiInputString
-        value={formData.username}
-        onChange={updateField('username')}
-        label="username"
-        ariaLabel="Username"
-      />
-      <ImGuiInputString
-        value={formData.password}
-        onChange={updateField('password')}
-        label="password"
-        ariaLabel="Password"
-        type="password"
-      />
-      <div className="flex items-center gap-3">
-        <ImGuiButton onClick={() => authMutation.mutate()}>{registerMode ? 'Sign Up' : 'Login'}</ImGuiButton>
-        <ImGuiButton onClick={switchMode}>
-          {registerMode ? 'Login Instead' : 'Register Instead'}
-        </ImGuiButton>
-        {status && <span className="text-[14px] text-[#9ab4d2]">{status}</span>}
-      </div>
     </div>
   )
 }

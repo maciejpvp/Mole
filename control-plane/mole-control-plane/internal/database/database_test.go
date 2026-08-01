@@ -231,8 +231,8 @@ func createTestUser(t *testing.T, srv *service, userID string) {
 		t.Fatalf("get free plan: %v", err)
 	}
 	if _, err := srv.db.Exec(`
-		INSERT INTO users (id, username, email, password_hash, plan_id)
-		VALUES ($1, $2, $3, '$2a$12$LQv3c1yqrv9IXNVzXuD.Tu3W6Lxsa0YQzM8b0e4ujdMZD8ydphbOm', $4)`,
+		INSERT INTO users (id, username, email, google_subject, plan_id)
+		VALUES ($1, $2, $3, $1, $4)`,
 		userID, userID, userID+"@example.com", planID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

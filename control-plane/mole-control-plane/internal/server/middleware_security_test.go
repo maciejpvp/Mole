@@ -150,7 +150,7 @@ func TestAuthRateLimitingIntegration(t *testing.T) {
 	router := s.RegisterRoutes()
 
 	makeReq := func() int {
-		req, _ := http.NewRequest("POST", "/api/v1/auth/login", strings.NewReader(`{"identifier":"a","password":"b"}`))
+		req, _ := http.NewRequest("POST", "/api/v1/auth/google/exchange", strings.NewReader(`{"code":"invalid"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "10.10.10.10:5555"
 		rec := httptest.NewRecorder()

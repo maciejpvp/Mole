@@ -13,42 +13,31 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
-	bcryptCost          = 12
-	maxFailedAttempts   = 5
-	accountLockDuration = 15 * time.Minute
-	defaultSessionTTL   = 24 * time.Hour
+	defaultSessionTTL = 24 * time.Hour
+	loginCodeTTL      = 60 * time.Second
 )
 
 var (
 	ErrInvalidInput       = errors.New("invalid input")
 	ErrAccountUnavailable = errors.New("account unavailable")
-	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrUnauthenticated    = errors.New("unauthenticated")
 )
 
-// Service owns user registration, password verification, and session creation.
+// Service owns Google identity provisioning and session creation.
 type Service struct {
 	db         *sql.DB
 	sessionTTL time.Duration
 	now        func() time.Time
 }
 
-type RegisterInput struct {
-	Username string
-	Email    string
-	Password string
-}
-
-type LoginInput struct {
-	Identifier string
-	Password   string
+type GoogleIdentity struct {
+	Subject string
+	Email   string
 }
 
 type User struct {
@@ -145,127 +134,160 @@ func (s *Service) ListPlans(ctx context.Context) ([]Plan, error) {
 	return plans, nil
 }
 
-func (s *Service) Register(ctx context.Context, input RegisterInput) (Authentication, error) {
-	username, email, password, err := normalizeRegistration(input)
-	if err != nil {
-		return Authentication{}, err
-	}
-
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
-		return Authentication{}, fmt.Errorf("hash password: %w", err)
-	}
-	userID, err := randomToken(16)
-	if err != nil {
-		return Authentication{}, fmt.Errorf("generate user ID: %w", err)
+func (s *Service) LoginWithGoogle(ctx context.Context, identity GoogleIdentity) (string, error) {
+	subject := strings.TrimSpace(identity.Subject)
+	email := strings.ToLower(strings.TrimSpace(identity.Email))
+	if subject == "" || !validEmail(email) {
+		return "", ErrInvalidInput
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Authentication{}, fmt.Errorf("begin registration: %w", err)
+		return "", fmt.Errorf("begin Google login: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	var planID int64
-	if err := tx.QueryRowContext(ctx, "SELECT id FROM plans WHERE name = 'free'").Scan(&planID); err != nil {
-		return Authentication{}, fmt.Errorf("get free plan: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO users (id, username, email, password_hash, plan_id)
-		VALUES ($1, $2, $3, $4, $5)`, userID, username, email, string(passwordHash), planID)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return Authentication{}, ErrAccountUnavailable
+	var account User
+	err = tx.QueryRowContext(ctx, `
+		SELECT users.id, users.username, users.email, plans.name, users.is_banned
+		FROM users JOIN plans ON plans.id = users.plan_id
+		WHERE users.google_subject = $1 FOR UPDATE`, subject).Scan(
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsBanned,
+	)
+	now := s.now().UTC()
+	if errors.Is(err, sql.ErrNoRows) {
+		userID, idErr := randomToken(16)
+		if idErr != nil {
+			return "", fmt.Errorf("generate user ID: %w", idErr)
 		}
-		return Authentication{}, fmt.Errorf("create user: %w", err)
-	}
-
-	auth, err := s.createSession(ctx, tx, User{ID: userID, Username: username, Email: email, Plan: "free"})
-	if err != nil {
-		return Authentication{}, err
+		username, nameErr := s.nextUsername(ctx, tx, email, subject)
+		if nameErr != nil {
+			return "", nameErr
+		}
+		var planID int64
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM plans WHERE name = 'free'").Scan(&planID); err != nil {
+			return "", fmt.Errorf("get free plan: %w", err)
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO users (id, username, email, google_subject, plan_id, last_login_at)
+			VALUES ($1, $2, $3, $4, $5, $6)`, userID, username, email, subject, planID, now)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return "", ErrAccountUnavailable
+			}
+			return "", fmt.Errorf("create Google user: %w", err)
+		}
+		account = User{ID: userID, Username: username, Email: email, Plan: "free"}
+	} else if err != nil {
+		return "", fmt.Errorf("find Google account: %w", err)
+	} else {
+		if account.IsBanned {
+			return "", ErrUnauthenticated
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE users SET email = $1, last_login_at = $2 WHERE id = $3", email, now, account.ID); err != nil {
+			return "", fmt.Errorf("record Google login: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return Authentication{}, fmt.Errorf("commit registration: %w", err)
+		return "", fmt.Errorf("commit Google login: %w", err)
 	}
-	return auth, nil
+	return account.ID, nil
 }
 
-func (s *Service) Login(ctx context.Context, input LoginInput) (Authentication, error) {
-	identifier := strings.ToLower(strings.TrimSpace(input.Identifier))
-	if identifier == "" || input.Password == "" || len(input.Password) > 72 {
-		return Authentication{}, ErrInvalidCredentials
+func (s *Service) nextUsername(ctx context.Context, tx *sql.Tx, email, subject string) (string, error) {
+	local := strings.ToLower(strings.SplitN(email, "@", 2)[0])
+	var builder strings.Builder
+	for _, char := range local {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			builder.WriteRune(char)
+		}
 	}
+	base := builder.String()
+	base = strings.TrimLeft(base, "_-")
+	if len(base) < 3 {
+		base = "user"
+	}
+	if len(base) > 32 {
+		base = base[:32]
+	}
+	username := base
+	var taken bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE username = $1)", username).Scan(&taken); err != nil {
+		return "", fmt.Errorf("check username: %w", err)
+	}
+	if !taken {
+		return username, nil
+	}
+	hash := sha256.Sum256([]byte(subject))
+	suffix := fmt.Sprintf("-%x", hash[:3])
+	prefixLength := 32 - len(suffix)
+	if len(base) > prefixLength {
+		base = base[:prefixLength]
+	}
+	username = base + suffix
+	for attempt := 1; ; attempt++ {
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM users WHERE username = $1)", username).Scan(&taken); err != nil {
+			return "", fmt.Errorf("check username suffix: %w", err)
+		}
+		if !taken {
+			return username, nil
+		}
+		candidate := fmt.Sprintf("%s-%d", base, attempt)
+		if len(candidate) > 32 {
+			candidate = candidate[:32]
+		}
+		username = candidate
+	}
+}
 
+func (s *Service) CreateLoginCode(ctx context.Context, userID string) (string, error) {
+	code, err := randomToken(32)
+	if err != nil {
+		return "", fmt.Errorf("generate login code: %w", err)
+	}
+	hash := sha256.Sum256([]byte(code))
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO auth_login_codes (code_hash, user_id, expires_at)
+		VALUES ($1, $2, $3)`, hash[:], userID, s.now().UTC().Add(loginCodeTTL)); err != nil {
+		return "", fmt.Errorf("store login code: %w", err)
+	}
+	return code, nil
+}
+
+func (s *Service) ExchangeLoginCode(ctx context.Context, code string) (Authentication, error) {
+	if strings.TrimSpace(code) == "" {
+		return Authentication{}, ErrUnauthenticated
+	}
+	hash := sha256.Sum256([]byte(code))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Authentication{}, fmt.Errorf("begin login: %w", err)
+		return Authentication{}, fmt.Errorf("begin login code exchange: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-
-	var (
-		account        User
-		passwordHash   string
-		failedAttempts int
-		lockedUntil    sql.NullTime
-	)
+	var account User
+	var expiresAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT users.id, users.username, users.email, users.password_hash, plans.name,
-			users.failed_login_attempts, users.locked_until, users.is_banned
-		FROM users
+		SELECT users.id, users.username, users.email, plans.name, users.is_admin, users.is_banned, auth_login_codes.expires_at
+		FROM auth_login_codes
+		JOIN users ON users.id = auth_login_codes.user_id
 		JOIN plans ON plans.id = users.plan_id
-		WHERE users.username = $1 OR users.email = $1
-		FOR UPDATE`, identifier).Scan(
-		&account.ID, &account.Username, &account.Email, &passwordHash, &account.Plan,
-		&failedAttempts, &lockedUntil, &account.IsBanned,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Keep the cost of an unknown account login comparable to a real login.
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(input.Password))
-		return Authentication{}, ErrInvalidCredentials
+		WHERE auth_login_codes.code_hash = $1 AND auth_login_codes.used_at IS NULL
+		FOR UPDATE`, hash[:]).Scan(&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned, &expiresAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Authentication{}, fmt.Errorf("find login code: %w", err)
 	}
-	if err != nil {
-		return Authentication{}, fmt.Errorf("find account: %w", err)
+	if errors.Is(err, sql.ErrNoRows) || expiresAt.Before(s.now().UTC()) || account.IsBanned {
+		return Authentication{}, ErrUnauthenticated
 	}
-	if account.IsBanned {
-		return Authentication{}, ErrInvalidCredentials
-	}
-
-	now := s.now().UTC()
-	if lockedUntil.Valid && lockedUntil.Time.After(now) {
-		return Authentication{}, ErrInvalidCredentials
-	}
-	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(input.Password)) != nil {
-		failedAttempts++
-		var newLock sql.NullTime
-		if failedAttempts >= maxFailedAttempts {
-			newLock = sql.NullTime{Time: now.Add(accountLockDuration), Valid: true}
-			failedAttempts = 0
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE users
-			SET failed_login_attempts = $1, locked_until = $2
-			WHERE id = $3`, failedAttempts, newLock, account.ID); err != nil {
-			return Authentication{}, fmt.Errorf("record failed login: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return Authentication{}, fmt.Errorf("commit failed login: %w", err)
-		}
-		return Authentication{}, ErrInvalidCredentials
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE users
-		SET failed_login_attempts = 0, locked_until = NULL, last_login_at = $1
-		WHERE id = $2`, now, account.ID); err != nil {
-		return Authentication{}, fmt.Errorf("record login: %w", err)
+	if _, err := tx.ExecContext(ctx, "UPDATE auth_login_codes SET used_at = $1 WHERE code_hash = $2", s.now().UTC(), hash[:]); err != nil {
+		return Authentication{}, fmt.Errorf("consume login code: %w", err)
 	}
 	auth, err := s.createSession(ctx, tx, account)
 	if err != nil {
 		return Authentication{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return Authentication{}, fmt.Errorf("commit login: %w", err)
+		return Authentication{}, fmt.Errorf("commit login code exchange: %w", err)
 	}
 	return auth, nil
 }
@@ -391,38 +413,12 @@ func (s *Service) createSession(ctx context.Context, tx *sql.Tx, account User) (
 	return Authentication{User: account, Token: token, ExpiresAt: expiresAt}, nil
 }
 
-func normalizeRegistration(input RegisterInput) (string, string, string, error) {
-	username := strings.ToLower(strings.TrimSpace(input.Username))
-	email := strings.ToLower(strings.TrimSpace(input.Email))
-	if !validUsername(username) || !validEmail(email) || !validPassword(input.Password) {
-		return "", "", "", ErrInvalidInput
-	}
-	return username, email, input.Password, nil
-}
-
-func validUsername(value string) bool {
-	if len(value) < 3 || len(value) > 32 {
-		return false
-	}
-	for i, char := range value {
-		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || (i > 0 && (char == '_' || char == '-')) {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func validEmail(value string) bool {
 	if len(value) > 254 {
 		return false
 	}
 	parsed, err := mail.ParseAddress(value)
 	return err == nil && parsed.Address == value && strings.Count(value, "@") == 1
-}
-
-func validPassword(value string) bool {
-	return utf8.ValidString(value) && len(value) >= 12 && len(value) <= 72
 }
 
 func randomToken(byteLength int) (string, error) {
@@ -437,6 +433,3 @@ func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
-
-// A valid bcrypt hash used to equalize login timing when no account is found.
-const dummyPasswordHash = "$2a$12$LQv3c1yqrv9IXNVzXuD.Tu3W6Lxsa0YQzM8b0e4ujdMZD8ydphbOm"

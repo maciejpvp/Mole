@@ -46,13 +46,12 @@ export type UserProfile = AuthenticatedUser & {
   tunnels: Tunnel[]
 }
 
-export async function login(input: { identifier: string; password: string }) {
-  const response = await api.post<Authentication>('/api/v1/auth/login', input)
-  return response.data
+export function getGoogleLoginUrl() {
+  return `${api.defaults.baseURL ?? ''}/api/v1/auth/google/start`
 }
 
-export async function register(input: { username: string; email: string; password: string }) {
-  const response = await api.post<Authentication>('/api/v1/auth/register', input)
+export async function exchangeGoogleLogin(code: string) {
+  const response = await api.post<Authentication>('/api/v1/auth/google/exchange', { code })
   return response.data
 }
 
