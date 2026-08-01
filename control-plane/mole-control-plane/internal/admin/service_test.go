@@ -126,6 +126,56 @@ func TestChangeUserPlanRejectsMissingPlan(t *testing.T) {
 	}
 }
 
+func TestResetUserLimits(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	createdAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
+		WithArgs("user-1").WillReturnRows(sqlmock.NewRows([]string{
+		"id", "username", "email", "plan", "is_admin", "is_banned",
+		"monthly_minutes_used", "monthly_transfer_bytes_used", "created_at", "last_login_at",
+	}).AddRow("user-1", "alice", "alice@example.com", "free", false, false, 0, 0, createdAt, nil))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE tunnels")).
+		WithArgs("user-1").WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectCommit()
+
+	account, err := NewService(db).ResetUserLimits(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("reset user limits: %v", err)
+	}
+	if account.ID != "user-1" || account.MonthlyMinutesUsed != 0 || account.MonthlyTransferBytes != 0 {
+		t.Fatalf("unexpected reset account: %+v", account)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
+func TestResetUserLimitsRejectsMissingUser(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE users")).
+		WithArgs("missing-user").WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
+
+	if _, err := NewService(db).ResetUserLimits(context.Background(), "missing-user"); err != ErrUserNotFound {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("mock expectations: %v", err)
+	}
+}
+
 func TestSetUserAdmin(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

@@ -19,6 +19,11 @@ func (s *Server) listPlansHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) currentUserHandler(w http.ResponseWriter, r *http.Request) {
 	account := userFromContext(r.Context())
 
+	if err := s.tunnels.RefreshUserUsage(r.Context(), account.ID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to refresh user usage"})
+		return
+	}
+
 	profile, err := s.users.Profile(r.Context(), account.ID)
 	if err != nil {
 		if errors.Is(err, user.ErrUnauthenticated) {

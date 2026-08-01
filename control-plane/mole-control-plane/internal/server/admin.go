@@ -73,6 +73,23 @@ func (s *Server) adminChangeUserPlanHandler(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, account)
 }
 
+func (s *Server) adminResetUserLimitsHandler(w http.ResponseWriter, r *http.Request) {
+	account, err := s.admin.ResetUserLimits(r.Context(), chi.URLParam(r, "userId"))
+	if err != nil {
+		switch {
+		case errors.Is(err, admin.ErrInvalidInput):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "userId is required"})
+		case errors.Is(err, admin.ErrUserNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to reset user limits"})
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, account)
+}
+
 func (s *Server) adminSetUserAdminHandler(w http.ResponseWriter, r *http.Request) {
 	var request setUserAdminRequest
 	if err := decodeJSON(w, r, &request); err != nil {

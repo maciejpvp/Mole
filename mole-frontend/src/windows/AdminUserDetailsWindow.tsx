@@ -3,6 +3,7 @@ import type { AdminUser } from '../lib/api'
 import { useChangeAdminUserPlan } from '../hooks/useChangeAdminUserPlan'
 import { useSetAdminUserPermission } from '../hooks/useSetAdminUserPermission'
 import { useSetAdminUserBanned } from '../hooks/useSetAdminUserBanned'
+import { useResetAdminUserLimits } from '../hooks/useResetAdminUserLimits'
 import { usePlans } from '../hooks/usePlans'
 import { errorMessage, formatBytes, formatDate } from '../utils'
 import type { WindowConfig } from '../types/window'
@@ -28,6 +29,7 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 	const changePlan = useChangeAdminUserPlan()
 	const setAdminPermission = useSetAdminUserPermission()
 	const setBanned = useSetAdminUserBanned()
+	const resetLimits = useResetAdminUserLimits()
 	const currentPlan = useMemo(
 		() => plansQuery.data?.find((plan) => plan.name === account.plan),
 		[plansQuery.data, account.plan],
@@ -43,7 +45,7 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 	const planChanged = selectedPlanId !== undefined && selectedPlanId !== currentPlan?.id
 	const adminPermissionChanged = selectedIsAdmin !== account.is_admin
 	const bannedChanged = selectedIsBanned !== account.is_banned
-	const isSaving = changePlan.isPending || setAdminPermission.isPending || setBanned.isPending
+	const isSaving = changePlan.isPending || setAdminPermission.isPending || setBanned.isPending || resetLimits.isPending
 	const hasChanges = planChanged || adminPermissionChanged || bannedChanged
 
 	const saveAccount = async () => {
@@ -69,6 +71,17 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 		} catch {
 			// The mutation status below describes the failed request. Any earlier
 			// successful change remains persisted and is reflected in local state.
+		}
+	}
+
+	const resetUsageLimits = async () => {
+		if (isSaving) return
+		resetLimits.reset()
+		try {
+			const updatedAccount = await resetLimits.mutateAsync(account.id)
+			setAccount(updatedAccount)
+		} catch {
+			// The mutation status below describes the failed request.
 		}
 	}
 
@@ -128,13 +141,21 @@ export function AdminUserDetailsWindow({ user }: AdminUserDetailsWindowProps) {
 						<option value="no">NO</option>
 					</select>
 				</div>
-				<button type="button" disabled className="border border-[#404859] px-2 py-1 text-[#808080] disabled:opacity-60">[ reset usage limits ]</button>
+				<button
+					type="button"
+					onClick={() => void resetUsageLimits()}
+					disabled={isSaving}
+					className="border border-[#404859] px-2 py-1 text-[#c5c5c5] hover:bg-[#2b2f3a] disabled:opacity-40"
+				>
+					{resetLimits.isPending ? '[ resetting… ]' : '[ reset usage limits ]'}
+				</button>
 				<div className="text-[#808080]">// account actions are not available yet</div>
 			</div>
 
 			{setAdminPermission.isError ? <StatusMessage tone="error">{errorMessage(setAdminPermission.error, 'Unable to update administrator permission')}</StatusMessage> : null}
 			{setBanned.isError ? <StatusMessage tone="error">{errorMessage(setBanned.error, 'Unable to update ban status')}</StatusMessage> : null}
-			{!changePlan.isError && !setAdminPermission.isError && !setBanned.isError && (changePlan.isSuccess || setAdminPermission.isSuccess || setBanned.isSuccess) ? <StatusMessage tone="success">Account updated.</StatusMessage> : null}
+			{resetLimits.isError ? <StatusMessage tone="error">{errorMessage(resetLimits.error, 'Unable to reset usage limits')}</StatusMessage> : null}
+			{!changePlan.isError && !setAdminPermission.isError && !setBanned.isError && !resetLimits.isError && (changePlan.isSuccess || setAdminPermission.isSuccess || setBanned.isSuccess || resetLimits.isSuccess) ? <StatusMessage tone="success">Account updated.</StatusMessage> : null}
 			<div className="mt-auto flex justify-end pt-2">
 				<button
 					type="button"

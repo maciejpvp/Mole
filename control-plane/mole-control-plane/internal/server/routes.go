@@ -64,6 +64,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 		r.Use(requireAdministrator)
 		r.Get("/users", s.adminListUsersHandler)
 		r.Patch("/users/{userId}/plan", s.adminChangeUserPlanHandler)
+		r.Post("/users/{userId}/reset-limits", s.adminResetUserLimitsHandler)
 		r.Patch("/users/{userId}/admin", s.adminSetUserAdminHandler)
 		r.Patch("/users/{userId}/ban", s.adminSetUserBannedHandler)
 	})

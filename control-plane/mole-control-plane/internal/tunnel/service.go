@@ -91,6 +91,24 @@ func NewService(db *sql.DB, provisioner Provisioner) *Service {
 	return &Service{db: db, provisioner: provisioner, now: time.Now}
 }
 
+// RefreshUserUsage resets a user's counters when their monthly usage period
+// has expired. It is safe to call this before returning usage to a client.
+func (s *Service) RefreshUserUsage(ctx context.Context, userID string) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin usage refresh: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := lockAndRefreshUserUsage(ctx, tx, userID, s.now().UTC()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit usage refresh: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) Create(ctx context.Context, userID string, input CreateInput) (Tunnel, error) {
 	protocol, internalIP, internalPort, err := validateInput(input)
 	if err != nil {
@@ -440,24 +458,34 @@ func lockAndRefreshUserUsage(ctx context.Context, tx *sql.Tx, userID string, now
 	if limits.isBanned {
 		return userLimits{}, ErrUserBanned
 	}
+	if err := resetExpiredUserUsage(ctx, tx, userID, now, periodStart); err != nil {
+		return userLimits{}, err
+	}
 	if !now.Before(periodStart.AddDate(0, 1, 0)) {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE users
-			SET usage_period_started_at = $1, monthly_minutes_used = 0,
-				monthly_transfer_bytes_used = 0, usage_limit_reached_at = NULL
-			WHERE id = $2`, now, userID); err != nil {
-			return userLimits{}, fmt.Errorf("reset monthly usage: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE tunnels
-			SET current_period_minutes = 0, current_period_transfer_bytes = 0
-			WHERE user_id = $1`, userID); err != nil {
-			return userLimits{}, fmt.Errorf("reset tunnel usage: %w", err)
-		}
 		limits.monthlyMinutesUsed = 0
 		limits.monthlyTransferUsed = 0
 	}
 	return limits, nil
+}
+
+func resetExpiredUserUsage(ctx context.Context, tx *sql.Tx, userID string, now, periodStart time.Time) error {
+	if now.Before(periodStart.AddDate(0, 1, 0)) {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users
+		SET usage_period_started_at = $1, monthly_minutes_used = 0,
+			monthly_transfer_bytes_used = 0, usage_limit_reached_at = NULL
+		WHERE id = $2`, now, userID); err != nil {
+		return fmt.Errorf("reset monthly usage: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tunnels
+		SET current_period_minutes = 0, current_period_transfer_bytes = 0
+		WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("reset tunnel usage: %w", err)
+	}
+	return nil
 }
 
 func usageAtLimit(limits userLimits) bool {

@@ -245,6 +245,58 @@ func (s *Service) ChangeUserPlan(ctx context.Context, userID string, planID int6
 	return account, nil
 }
 
+// ResetUserLimits starts a new usage period for a user and resets the
+// per-period counters on all of the user's tunnels.
+func (s *Service) ResetUserLimits(ctx context.Context, userID string) (User, error) {
+	if s == nil || s.db == nil {
+		return User{}, errors.New("admin database unavailable")
+	}
+	if strings.TrimSpace(userID) == "" {
+		return User{}, ErrInvalidInput
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("begin reset user limits: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var account User
+	err = tx.QueryRowContext(ctx, `
+		UPDATE users
+		SET usage_period_started_at = CURRENT_TIMESTAMP,
+			monthly_minutes_used = 0,
+			monthly_transfer_bytes_used = 0,
+			usage_limit_reached_at = NULL
+		WHERE id = $1
+		RETURNING users.id, users.username, users.email,
+			(SELECT plans.name FROM plans WHERE plans.id = users.plan_id), users.is_admin, users.is_banned,
+			users.monthly_minutes_used, users.monthly_transfer_bytes_used,
+			users.created_at, users.last_login_at`, userID).Scan(
+		&account.ID, &account.Username, &account.Email, &account.Plan, &account.IsAdmin, &account.IsBanned,
+		&account.MonthlyMinutesUsed, &account.MonthlyTransferBytes,
+		&account.CreatedAt, &account.LastLoginAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("reset user limits: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tunnels
+		SET current_period_minutes = 0,
+			current_period_transfer_bytes = 0
+		WHERE user_id = $1`, userID); err != nil {
+		return User{}, fmt.Errorf("reset tunnel limits: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("commit reset user limits: %w", err)
+	}
+	return account, nil
+}
+
 // SetUserBanned updates a user's ban state. When banning, all relay listeners
 // and tunnel records are removed before the transaction is committed.
 func (s *Service) SetUserBanned(ctx context.Context, userID string, isBanned bool) (User, error) {

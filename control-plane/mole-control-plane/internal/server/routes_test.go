@@ -60,6 +60,17 @@ func TestAdminChangeUserPlanRouteRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestAdminResetUserLimitsRouteRequiresAuthentication(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).RegisterRoutes().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/admin/users/user-1/reset-limits", nil))
+	resp := recorder.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected status unauthorized; got %v", resp.Status)
+	}
+}
+
 func TestAdminSetUserAdminRouteRequiresAuthentication(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	(&Server{}).RegisterRoutes().ServeHTTP(recorder, httptest.NewRequest(http.MethodPatch, "/api/v1/admin/users/user-1/admin", nil))

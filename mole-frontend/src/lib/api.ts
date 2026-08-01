@@ -94,6 +94,10 @@ export function changeAdminUserPlan(userId: string, planId: number) {
 	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/plan`, { plan_id: planId })
 }
 
+export function resetAdminUserLimits(userId: string) {
+	return api.post<AdminUser>(`/api/v1/admin/users/${userId}/reset-limits`)
+}
+
 export function setAdminUserPermission(userId: string, isAdmin: boolean) {
 	return api.patch<AdminUser>(`/api/v1/admin/users/${userId}/admin`, { is_admin: isAdmin })
 }
