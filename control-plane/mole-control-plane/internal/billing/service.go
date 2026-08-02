@@ -23,6 +23,11 @@ var (
 	ErrInvalidWebhook = errors.New("invalid webhook")
 )
 
+const (
+	stripeModeTest = "test"
+	stripeModeLive = "live"
+)
+
 type StripeGateway interface {
 	CreateCustomer(context.Context, *stripe.CustomerCreateParams) (*stripe.Customer, error)
 	CreateSetupIntent(context.Context, *stripe.SetupIntentCreateParams) (*stripe.SetupIntent, error)
@@ -46,6 +51,7 @@ func (g stripeGateway) RetrieveSetupIntent(ctx context.Context, id string) (*str
 type Service struct {
 	db            *sql.DB
 	stripe        StripeGateway
+	stripeMode    string
 	webhookSecret string
 	now           func() time.Time
 }
@@ -65,15 +71,16 @@ type ConfirmationResult struct {
 }
 
 func NewService(db *sql.DB, secretKey, webhookSecret string) *Service {
-	service := &Service{db: db, webhookSecret: strings.TrimSpace(webhookSecret), now: time.Now}
-	if strings.TrimSpace(secretKey) != "" {
-		service.stripe = stripeGateway{client: stripe.NewClient(strings.TrimSpace(secretKey))}
+	secretKey = strings.TrimSpace(secretKey)
+	service := &Service{db: db, stripeMode: stripeModeFromSecretKey(secretKey), webhookSecret: strings.TrimSpace(webhookSecret), now: time.Now}
+	if secretKey != "" {
+		service.stripe = stripeGateway{client: stripe.NewClient(secretKey)}
 	}
 	return service
 }
 
 func NewServiceWithGateway(db *sql.DB, gateway StripeGateway, webhookSecret string) *Service {
-	return &Service{db: db, stripe: gateway, webhookSecret: strings.TrimSpace(webhookSecret), now: time.Now}
+	return &Service{db: db, stripe: gateway, stripeMode: stripeModeTest, webhookSecret: strings.TrimSpace(webhookSecret), now: time.Now}
 }
 
 func (s *Service) CreateCardValidation(ctx context.Context, account user.User) (SetupIntentResult, error) {
@@ -214,11 +221,11 @@ func (s *Service) HandleWebhook(ctx context.Context, payload []byte, signature s
 }
 
 func (s *Service) customerRecord(ctx context.Context, account user.User) (string, string, bool, error) {
-	var customerID, intentID string
+	var customerID, intentID, storedStripeMode string
 	var verifiedAt sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
-		SELECT stripe_customer_id, COALESCE(latest_setup_intent_id, ''), card_verified_at
-		FROM billing_customers WHERE user_id = $1`, account.ID).Scan(&customerID, &intentID, &verifiedAt)
+		SELECT stripe_customer_id, COALESCE(latest_setup_intent_id, ''), card_verified_at, stripe_mode
+		FROM billing_customers WHERE user_id = $1`, account.ID).Scan(&customerID, &intentID, &verifiedAt, &storedStripeMode)
 	if errors.Is(err, sql.ErrNoRows) {
 		params := &stripe.CustomerCreateParams{
 			Email:    stripe.String(account.Email),
@@ -233,8 +240,8 @@ func (s *Service) customerRecord(ctx context.Context, account user.User) (string
 			return "", "", false, ErrNotFound
 		}
 		if _, insertErr := s.db.ExecContext(ctx, `
-			INSERT INTO billing_customers (user_id, stripe_customer_id)
-			VALUES ($1, $2)`, account.ID, customer.ID); insertErr != nil {
+			INSERT INTO billing_customers (user_id, stripe_customer_id, stripe_mode)
+			VALUES ($1, $2, $3)`, account.ID, customer.ID, s.stripeMode); insertErr != nil {
 			return "", "", false, fmt.Errorf("store Stripe customer: %w", insertErr)
 		}
 		return customer.ID, "", false, nil
@@ -242,7 +249,54 @@ func (s *Service) customerRecord(ctx context.Context, account user.User) (string
 	if err != nil {
 		return "", "", false, fmt.Errorf("find Stripe customer: %w", err)
 	}
+	if storedStripeMode != s.stripeMode {
+		return s.replaceCustomerForMode(ctx, account, storedStripeMode)
+	}
 	return customerID, intentID, verifiedAt.Valid, nil
+}
+
+func (s *Service) replaceCustomerForMode(ctx context.Context, account user.User, previousMode string) (string, string, bool, error) {
+	params := &stripe.CustomerCreateParams{
+		Email:    stripe.String(account.Email),
+		Metadata: map[string]string{"mole_user_id": account.ID, "mole_stripe_mode": s.stripeMode},
+	}
+	params.SetIdempotencyKey("mole-customer-" + s.stripeMode + "-" + account.ID)
+	customer, err := s.stripe.CreateCustomer(ctx, params)
+	if err != nil {
+		return "", "", false, fmt.Errorf("create %s Stripe customer while changing from %s mode: %w", s.stripeMode, previousMode, err)
+	}
+	if customer == nil || customer.ID == "" {
+		return "", "", false, ErrNotFound
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", false, fmt.Errorf("begin Stripe mode change: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE billing_customers
+		SET stripe_customer_id = $1,
+			stripe_payment_method_id = NULL,
+			latest_setup_intent_id = NULL,
+			card_verified_at = NULL,
+			stripe_mode = $2,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE user_id = $3`, customer.ID, s.stripeMode, account.ID); err != nil {
+		return "", "", false, fmt.Errorf("store %s Stripe customer: %w", s.stripeMode, err)
+	}
+	if account.Plan == "free" {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE users
+			SET plan_id = (SELECT id FROM plans WHERE name = 'pending')
+			WHERE id = $1 AND plan_id = (SELECT id FROM plans WHERE name = 'free')`, account.ID); err != nil {
+			return "", "", false, fmt.Errorf("reset free plan after Stripe mode change: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", false, fmt.Errorf("commit Stripe mode change: %w", err)
+	}
+	return customer.ID, "", false, nil
 }
 
 func (s *Service) activateFreeTier(ctx context.Context, userID, customerID, intentID, paymentMethodID string) error {
@@ -286,4 +340,11 @@ func setupIntentIsReusable(status stripe.SetupIntentStatus) bool {
 
 func setupIntentIsCardOnly(intent *stripe.SetupIntent) bool {
 	return intent != nil && len(intent.PaymentMethodTypes) == 1 && intent.PaymentMethodTypes[0] == "card"
+}
+
+func stripeModeFromSecretKey(secretKey string) string {
+	if strings.HasPrefix(secretKey, "sk_live_") || strings.HasPrefix(secretKey, "rk_live_") {
+		return stripeModeLive
+	}
+	return stripeModeTest
 }
