@@ -7,7 +7,12 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+
+# The publishable key is intentionally a build-time value: it is public and
+# must be embedded in the static browser bundle. Never pass secret keys here.
+ARG VITE_STRIPE_PUBLISHABLE_KEY
+ENV VITE_STRIPE_PUBLISHABLE_KEY=${VITE_STRIPE_PUBLISHABLE_KEY}
+RUN test -n "$VITE_STRIPE_PUBLISHABLE_KEY" && npm run build
 
 # ---- Serve stage ----
 FROM nginx:alpine

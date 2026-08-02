@@ -81,6 +81,8 @@ services:
       GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-http://localhost/api/v1/auth/google/callback}
       GOOGLE_FRONTEND_URL: ${GOOGLE_FRONTEND_URL:-http://localhost}
       GOOGLE_COOKIE_SECURE: ${GOOGLE_COOKIE_SECURE:-true}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?STRIPE_SECRET_KEY must be set for production}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?STRIPE_WEBHOOK_SECRET must be set for production}
       BLOCKED_IPS: ${BLOCKED_IPS:-}
       ALLOWED_IPS: ${ALLOWED_IPS:-}
     deploy:

@@ -38,6 +38,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	// Unrestricted / Health check endpoint
 	r.Get("/", s.HelloWorldHandler)
 	r.Get("/health", s.healthHandler)
+	r.Post("/api/v1/billing/webhook", s.stripeWebhookHandler)
 
 	// Auth Subrouter with Stricter Rate Limiter
 	authRPS := GetEnvFloat("AUTH_RATE_LIMIT_RPS", 2.0)
@@ -59,6 +60,8 @@ func (s *Server) RegisterRoutes() http.Handler {
 		r.Get("/api/v1/events", s.eventsHandler)
 		r.Post("/api/v1/tunnels", s.createTunnelHandler)
 		r.Delete("/api/v1/tunnels/{tunnelID}", s.deleteTunnelHandler)
+		r.Post("/api/v1/billing/card-validation/setup", s.createCardValidationHandler)
+		r.Post("/api/v1/billing/card-validation/confirm", s.confirmCardValidationHandler)
 	})
 	r.Route("/api/v1/admin", func(r chi.Router) {
 		r.Use(s.requireAuthentication)

@@ -127,6 +127,10 @@ func TestPlansMigration(t *testing.T) {
 			if maxActiveTunnels != nil || monthlyMinutes != nil || monthlyTransferBytes != nil {
 				t.Fatalf("expected unlimited plan limits to be unset")
 			}
+		case "pending":
+			if maxActiveTunnels == nil || *maxActiveTunnels != 0 || monthlyMinutes == nil || *monthlyMinutes != 0 || monthlyTransferBytes == nil || *monthlyTransferBytes != 0 {
+				t.Fatalf("unexpected pending plan limits")
+			}
 		default:
 			t.Fatalf("unexpected plan %q", name)
 		}
@@ -136,7 +140,7 @@ func TestPlansMigration(t *testing.T) {
 		t.Fatalf("iterate plans: %v", err)
 	}
 
-	expected := []string{"free", "premium", "unlimited"}
+	expected := []string{"free", "pending", "premium", "unlimited"}
 	if len(names) != len(expected) {
 		t.Fatalf("expected plans %v, got %v", expected, names)
 	}

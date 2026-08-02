@@ -5,10 +5,13 @@ import { useUser, userQueryKey } from '../hooks/useUser'
 import { exchangeGoogleLogin, getGoogleLoginUrl } from '../lib/auth'
 import { errorMessage } from '../utils'
 import { useQueryClient } from '@tanstack/react-query'
+import { useWindowContext } from '../hooks/useWindowContext'
+import { createCardVerificationWindow } from './windowConfigs'
 
 export function AuthWindow() {
   const { accessToken, setSessionAccessToken } = useAuthSession()
   const queryClient = useQueryClient()
+  const { addWindow } = useWindowContext()
   const userQuery = useUser(accessToken)
   const [googleStatus, setGoogleStatus] = useState('')
 
@@ -43,9 +46,16 @@ export function AuthWindow() {
 
   if (userQuery.data) {
     return (
-      <div className="flex items-center gap-3">
-        <span>Signed in as {userQuery.data.username}</span>
-        <ImGuiButton onClick={logout}>Log Out</ImGuiButton>
+      <div className="space-y-3">
+        <div className="flex items-center gap-3">
+          <span>Signed in as {userQuery.data.username}</span>
+          <ImGuiButton onClick={logout}>Log Out</ImGuiButton>
+        </div>
+        {userQuery.data.plan === 'pending' && (
+          <ImGuiButton onClick={() => addWindow(createCardVerificationWindow())}>
+            Want free tier? Verify your card
+          </ImGuiButton>
+        )}
       </div>
     )
   }

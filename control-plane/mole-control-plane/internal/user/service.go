@@ -165,8 +165,8 @@ func (s *Service) LoginWithGoogle(ctx context.Context, identity GoogleIdentity) 
 			return "", nameErr
 		}
 		var planID int64
-		if err := tx.QueryRowContext(ctx, "SELECT id FROM plans WHERE name = 'free'").Scan(&planID); err != nil {
-			return "", fmt.Errorf("get free plan: %w", err)
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM plans WHERE name = 'pending'").Scan(&planID); err != nil {
+			return "", fmt.Errorf("get pending plan: %w", err)
 		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO users (id, username, email, google_subject, plan_id, last_login_at)
@@ -177,7 +177,7 @@ func (s *Service) LoginWithGoogle(ctx context.Context, identity GoogleIdentity) 
 			}
 			return "", fmt.Errorf("create Google user: %w", err)
 		}
-		account = User{ID: userID, Username: username, Email: email, Plan: "free"}
+		account = User{ID: userID, Username: username, Email: email, Plan: "pending"}
 	} else if err != nil {
 		return "", fmt.Errorf("find Google account: %w", err)
 	} else {

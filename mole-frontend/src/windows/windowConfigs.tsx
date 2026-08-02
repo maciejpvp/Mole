@@ -1,6 +1,7 @@
 import type { WindowConfig } from '../types/window'
 import { AdminUsersWindow } from './AdminUsersWindow'
 import { CreateTunnelWindow } from './CreateTunnelWindow'
+import { CardVerificationWindow } from './CardVerificationWindow'
 
 export function createAdminUsersWindow(): WindowConfig {
 	return {
@@ -21,5 +22,16 @@ export function createCreateTunnelWindow(): WindowConfig {
 		showCloseBtn: true,
 		children: <CreateTunnelWindow />,
 		defaultOpen: false,
+	}
+}
+
+export function createCardVerificationWindow(): WindowConfig {
+	return {
+		id: 'card_verification',
+		title: 'Card Verification',
+		layout: { x: 0.32, y: 0.2, width: 0.36, height: 0.42 },
+		children: <CardVerificationWindow />,
+		showCloseBtn: true,
+		defaultOpen: true,
 	}
 }

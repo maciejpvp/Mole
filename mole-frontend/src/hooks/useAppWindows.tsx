@@ -48,6 +48,7 @@ function removeAuthenticatedWindows(removeWindow: ReturnType<typeof useWindowMan
 	removeWindow('create_tunnel')
 	removeWindow('admin_dashboard')
 	removeWindow('admin_users')
+	removeWindow('card_verification')
 }
 
 export function useAppWindows(user: UserProfile | undefined) {

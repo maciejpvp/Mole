@@ -123,12 +123,13 @@ export function ImGuiText({ children }: { children: ReactNode }) {
   return <p className="m-0 font-mono text-[17px] leading-6 text-white">{children}</p>
 }
 
-export function ImGuiButton({ children, onClick }: { children: ReactNode; onClick?: () => void }) {
+export function ImGuiButton({ children, onClick, disabled }: { children: ReactNode; onClick?: () => void; disabled?: boolean }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="h-7 border border-[#3d608d] bg-[#2d4b75] px-1.5 font-mono text-[17px] leading-none text-white shadow-[inset_0_1px_rgba(255,255,255,0.12)] hover:bg-[#3a5d8a] active:translate-y-px active:bg-[#254165]"
+      disabled={disabled}
+      className="h-7 border border-[#3d608d] bg-[#2d4b75] px-1.5 font-mono text-[17px] leading-none text-white shadow-[inset_0_1px_rgba(255,255,255,0.12)] hover:bg-[#3a5d8a] active:translate-y-px active:bg-[#254165] disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
