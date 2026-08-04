@@ -7,6 +7,9 @@ services:
     env_file:
       - .env
 
+    volumes:
+      - mole_server_state:/var/lib/mole-server
+
     ports:
       - "${MOLE_CONTROL_PORT:-9000}:${MOLE_CONTROL_PORT:-9000}/tcp"
       - "127.0.0.1:${MOLE_MANAGEMENT_PORT:-9001}:${MOLE_MANAGEMENT_PORT:-9001}/tcp"
@@ -18,3 +21,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  mole_server_state:

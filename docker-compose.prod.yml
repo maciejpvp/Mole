@@ -112,6 +112,10 @@ services:
       MOLE_SERVER_API_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
       MOLE_CONTROL_PLANE_URL: http://mole-control-plane:8080
       MOLE_USAGE_SYNC_TOKEN: ${MOLE_SERVER_API_TOKEN:-replace-with-a-long-random-secret}
+      MOLE_GLOBAL_TRANSFER_LIMIT_BYTES: ${MOLE_GLOBAL_TRANSFER_LIMIT_BYTES:-5497558138880}
+      MOLE_SERVER_STATE_DIR: /var/lib/mole-server
+    volumes:
+      - mole_server_state:/var/lib/mole-server
     deploy:
       resources:
         limits:
@@ -140,3 +144,4 @@ networks:
 
 volumes:
   psql_data:
+  mole_server_state:

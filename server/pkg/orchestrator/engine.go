@@ -14,6 +14,8 @@ import (
 )
 
 const (
+	maxInt64 = int64(1<<63 - 1)
+
 	roleControl = byte(0x00)
 	roleTCPLeg  = byte(0x01)
 	roleUDP     = byte(0x02)
@@ -27,10 +29,12 @@ const (
 // Config configures one relay instance. Public ports are allocated only from
 // the inclusive PortMin/PortMax range.
 type Config struct {
-	ControlPort int
-	PortMin     int
-	PortMax     int
-	PublicHost  string
+	ControlPort              int
+	PortMin                  int
+	PortMax                  int
+	PublicHost               string
+	GlobalTransferLimitBytes int64
+	GlobalTransferStateDir   string
 }
 
 type ProvisionRequest struct {
@@ -72,6 +76,11 @@ type Engine struct {
 	tokens   map[[sha256.Size]byte]*tunnel
 	users    map[string]*userUsage
 	usedPort map[int]struct{}
+
+	globalTransferLimitBytes int64
+	globalTransferBytes      int64
+	globalFuseTripped        bool
+	globalTransferState      *transferStateStore
 
 	connectionStatusUpdates chan ConnectionStatusUpdate
 
@@ -117,15 +126,31 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.ControlPort < 1 || cfg.ControlPort > 65535 || cfg.PortMin < 1 || cfg.PortMax > 65535 || cfg.PortMin > cfg.PortMax || strings.TrimSpace(cfg.PublicHost) == "" {
 		return nil, errors.New("invalid relay configuration")
 	}
-	return &Engine{
-		cfg:                     cfg,
-		tunnels:                 make(map[string]*tunnel),
-		tokens:                  make(map[[sha256.Size]byte]*tunnel),
-		users:                   make(map[string]*userUsage),
-		usedPort:                make(map[int]struct{}),
-		connectionStatusUpdates: make(chan ConnectionStatusUpdate, 256),
-		stopCh:                  make(chan struct{}),
-	}, nil
+	if cfg.GlobalTransferLimitBytes < 0 {
+		return nil, errors.New("invalid global transfer limit: must be zero or positive")
+	}
+	engine := &Engine{
+		cfg:                      cfg,
+		tunnels:                  make(map[string]*tunnel),
+		tokens:                   make(map[[sha256.Size]byte]*tunnel),
+		users:                    make(map[string]*userUsage),
+		usedPort:                 make(map[int]struct{}),
+		connectionStatusUpdates:  make(chan ConnectionStatusUpdate, 256),
+		stopCh:                   make(chan struct{}),
+		globalTransferLimitBytes: cfg.GlobalTransferLimitBytes,
+	}
+	if cfg.GlobalTransferStateDir != "" && cfg.GlobalTransferLimitBytes > 0 {
+		store, state, err := openTransferState(cfg.GlobalTransferStateDir, cfg.GlobalTransferLimitBytes)
+		if err != nil {
+			if errors.Is(err, ErrGlobalFuseTripped) {
+				return nil, fmt.Errorf("%w: reset %s to recover", err, store.path)
+			}
+			return nil, err
+		}
+		engine.globalTransferState = store
+		engine.globalTransferBytes = state.TransferBytes
+	}
+	return engine, nil
 }
 
 // ConnectionStatusUpdates returns relay-authenticated connection changes in
@@ -185,6 +210,9 @@ func (e *Engine) Provision(request ProvisionRequest) (ProvisionResponse, error) 
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.globalFuseTripped {
+		return ProvisionResponse{}, ErrGlobalFuseTripped
+	}
 	if _, exists := e.tunnels[request.TunnelID]; exists {
 		return ProvisionResponse{}, errors.New("tunnel already exists")
 	}
@@ -605,20 +633,50 @@ func (e *Engine) recordBytes(tunnelID string, bytes int64) {
 		return
 	}
 	e.mu.Lock()
+	if e.globalFuseTripped {
+		e.mu.Unlock()
+		return
+	}
 	item := e.tunnels[tunnelID]
 	if item == nil {
 		e.mu.Unlock()
 		return
 	}
 	usage := e.users[item.userID]
+	globalTrip := false
+	if e.globalTransferLimitBytes > 0 {
+		if bytes > maxInt64-e.globalTransferBytes {
+			e.globalTransferBytes = maxInt64
+		} else {
+			e.globalTransferBytes += bytes
+		}
+		globalTrip = e.globalTransferBytes >= e.globalTransferLimitBytes
+		if e.globalTransferState != nil {
+			state := transferState{TransferBytes: e.globalTransferBytes, Tripped: globalTrip}
+			if globalTrip {
+				state.TrippedAt = nowUTCString()
+			}
+			if err := e.globalTransferState.save(state); err != nil {
+				log.Printf("[orchestrator] global transfer state persistence failed: %v", err)
+				globalTrip = true
+			}
+		}
+	}
 	item.mu.Lock()
 	item.unsyncedTransferBytes += bytes
 	item.mu.Unlock()
 	usage.transferUsed += bytes
 	stops := e.enforceUserLimitLocked(usage)
+	if globalTrip {
+		e.globalFuseTripped = true
+		log.Printf("[orchestrator] global transfer limit reached: bytes=%d limit=%d; stopping server", e.globalTransferBytes, e.globalTransferLimitBytes)
+	}
 	e.mu.Unlock()
 	for _, stopped := range stops {
 		stopped.closeRuntime()
+	}
+	if globalTrip {
+		e.Stop()
 	}
 }
 

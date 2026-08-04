@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"errors"
 	"net"
 	"testing"
 )
@@ -53,6 +54,69 @@ func TestUDPFrameRoundTrip(t *testing.T) {
 	}
 	if address != "127.0.0.1:1234" || string(payload) != "payload" {
 		t.Fatalf("unexpected UDP frame: %q, %q", address, payload)
+	}
+}
+
+func TestGlobalTransferFusePersistsAndStops(t *testing.T) {
+	stateDir := t.TempDir()
+	engine, err := New(Config{
+		ControlPort:              9000,
+		PortMin:                  10000,
+		PortMax:                  10000,
+		PublicHost:               "tunnels.example.test",
+		GlobalTransferLimitBytes: 10,
+		GlobalTransferStateDir:   stateDir,
+	})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	item := &tunnel{engine: engine, id: "tunnel-1", userID: "user-1", sessions: make(map[net.Conn]struct{})}
+	engine.mu.Lock()
+	engine.tunnels[item.id] = item
+	engine.users[item.userID] = &userUsage{tunnels: map[string]*tunnel{item.id: item}}
+	engine.mu.Unlock()
+
+	engine.recordBytes(item.id, 10)
+	select {
+	case <-engine.stopCh:
+	default:
+		t.Fatal("expected global fuse to stop the engine")
+	}
+
+	if _, err := New(Config{
+		ControlPort:              9000,
+		PortMin:                  10000,
+		PortMax:                  10000,
+		PublicHost:               "tunnels.example.test",
+		GlobalTransferLimitBytes: 10,
+		GlobalTransferStateDir:   stateDir,
+	}); !errors.Is(err, ErrGlobalFuseTripped) {
+		t.Fatalf("expected persisted fuse to reject restart, got %v", err)
+	}
+}
+
+func TestZeroGlobalTransferLimitIsUnlimited(t *testing.T) {
+	engine, err := New(Config{
+		ControlPort:              9000,
+		PortMin:                  10000,
+		PortMax:                  10000,
+		PublicHost:               "tunnels.example.test",
+		GlobalTransferLimitBytes: 0,
+	})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	item := &tunnel{engine: engine, id: "tunnel-unlimited", userID: "user-1", sessions: make(map[net.Conn]struct{})}
+	engine.mu.Lock()
+	engine.tunnels[item.id] = item
+	engine.users[item.userID] = &userUsage{tunnels: map[string]*tunnel{item.id: item}}
+	engine.mu.Unlock()
+
+	engine.recordBytes(item.id, 1<<62)
+	select {
+	case <-engine.stopCh:
+		t.Fatal("zero global transfer limit must not stop the engine")
+	default:
 	}
 }
 

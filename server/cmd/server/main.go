@@ -28,10 +28,12 @@ func main() {
 		cfg.ControlPort, cfg.PortMin, cfg.PortMax)
 
 	engine, err := orchestrator.New(orchestrator.Config{
-		ControlPort: cfg.ControlPort,
-		PortMin:     cfg.PortMin,
-		PortMax:     cfg.PortMax,
-		PublicHost:  cfg.PublicHost,
+		ControlPort:              cfg.ControlPort,
+		PortMin:                  cfg.PortMin,
+		PortMax:                  cfg.PortMax,
+		PublicHost:               cfg.PublicHost,
+		GlobalTransferLimitBytes: cfg.GlobalTransferLimitBytes,
+		GlobalTransferStateDir:   cfg.GlobalTransferStateDir,
 	})
 	if err != nil {
 		log.Fatalf("[server] invalid configuration: %v", err)

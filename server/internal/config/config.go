@@ -9,14 +9,16 @@ import (
 )
 
 type Config struct {
-	ControlPort    int
-	PortMin        int
-	PortMax        int
-	PublicHost     string
-	APIListen      string
-	APIToken       string
-	UsageSyncURL   string
-	UsageSyncToken string
+	ControlPort              int
+	PortMin                  int
+	PortMax                  int
+	PublicHost               string
+	APIListen                string
+	APIToken                 string
+	UsageSyncURL             string
+	UsageSyncToken           string
+	GlobalTransferLimitBytes int64
+	GlobalTransferStateDir   string
 }
 
 // Load reads .env when present, then loads the relay configuration from the
@@ -49,6 +51,14 @@ func Load() (Config, error) {
 		UsageSyncURL:   strings.TrimSpace(os.Getenv("MOLE_CONTROL_PLANE_URL")),
 		UsageSyncToken: os.Getenv("MOLE_USAGE_SYNC_TOKEN"),
 	}
+	config.GlobalTransferLimitBytes, err = envInt64("MOLE_GLOBAL_TRANSFER_LIMIT_BYTES", 5*1024*1024*1024*1024)
+	if err != nil {
+		return Config{}, err
+	}
+	if config.GlobalTransferLimitBytes < 0 {
+		return Config{}, errors.New("MOLE_GLOBAL_TRANSFER_LIMIT_BYTES must be zero or positive")
+	}
+	config.GlobalTransferStateDir = envString("MOLE_SERVER_STATE_DIR", "/var/lib/mole-server")
 	if config.PublicHost == "" || config.APIToken == "" || config.UsageSyncURL == "" || config.UsageSyncToken == "" {
 		return Config{}, errors.New("MOLE_PUBLIC_HOST, MOLE_SERVER_API_TOKEN, MOLE_CONTROL_PLANE_URL, and MOLE_USAGE_SYNC_TOKEN are required")
 	}
@@ -63,6 +73,18 @@ func envInt(name string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envInt64(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a 64-bit integer: %w", name, err)
 	}
 	return parsed, nil
 }
