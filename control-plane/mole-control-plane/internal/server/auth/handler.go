@@ -1,4 +1,4 @@
-package server
+package auth
 
 import (
 	"context"
@@ -13,10 +13,9 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	"mole-control-plane/internal/server/httpx"
 	"mole-control-plane/internal/user"
 )
-
-const maxAuthRequestBytes = 8 << 10
 
 const (
 	googleStateCookie    = "mole-google-oauth-state"
@@ -34,7 +33,7 @@ type googleUserInfo struct {
 	EmailVerified bool   `json:"email_verified"`
 }
 
-func (s *Server) googleOAuthConfig() (*oauth2.Config, error) {
+func (h *Handler) googleOAuthConfig() (*oauth2.Config, error) {
 	clientID := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID"))
 	clientSecret := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET"))
 	redirectURL := strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URL"))
@@ -50,10 +49,10 @@ func (s *Server) googleOAuthConfig() (*oauth2.Config, error) {
 	}, nil
 }
 
-func (s *Server) googleStartHandler(w http.ResponseWriter, r *http.Request) {
-	config, err := s.googleOAuthConfig()
+func (h *Handler) GoogleStart(w http.ResponseWriter, r *http.Request) {
+	config, err := h.googleOAuthConfig()
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication is not configured"})
+		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google authentication is not configured"})
 		return
 	}
 	state := oauth2.GenerateVerifier()
@@ -63,14 +62,14 @@ func (s *Server) googleStartHandler(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, config.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier)), http.StatusFound)
 }
 
-func (s *Server) googleCallbackHandler(w http.ResponseWriter, r *http.Request) {
-	if s.users == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "auth service unavailable"})
+func (h *Handler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
+	if h.Users == nil {
+		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "auth service unavailable"})
 		return
 	}
 	frontendURL := strings.TrimRight(strings.TrimSpace(os.Getenv("GOOGLE_FRONTEND_URL")), "/")
 	if frontendURL == "" {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google frontend redirect is not configured"})
+		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Google frontend redirect is not configured"})
 		return
 	}
 	if r.URL.Query().Get("error") != "" {
@@ -86,7 +85,7 @@ func (s *Server) googleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	clearOAuthCookie(w, googleStateCookie)
 	clearOAuthCookie(w, googleVerifierCookie)
 
-	config, err := s.googleOAuthConfig()
+	config, err := h.googleOAuthConfig()
 	if err != nil {
 		redirectGoogleResult(w, r, frontendURL, "google_error=authentication_unavailable")
 		return
@@ -101,7 +100,7 @@ func (s *Server) googleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		redirectGoogleResult(w, r, frontendURL, "google_error=unverified_google_account")
 		return
 	}
-	userID, err := s.users.LoginWithGoogle(r.Context(), user.GoogleIdentity{Subject: identity.Subject, Email: identity.Email})
+	userID, err := h.Users.LoginWithGoogle(r.Context(), user.GoogleIdentity{Subject: identity.Subject, Email: identity.Email})
 	if err != nil {
 		if errors.Is(err, user.ErrUnauthenticated) {
 			redirectGoogleResult(w, r, frontendURL, "google_error=account_unavailable")
@@ -110,7 +109,7 @@ func (s *Server) googleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 		redirectGoogleResult(w, r, frontendURL, "google_error=unable_to_create_account")
 		return
 	}
-	code, err := s.users.CreateLoginCode(r.Context(), userID)
+	code, err := h.Users.CreateLoginCode(r.Context(), userID)
 	if err != nil {
 		redirectGoogleResult(w, r, frontendURL, "google_error=unable_to_create_session")
 		return
@@ -118,21 +117,21 @@ func (s *Server) googleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	redirectGoogleResult(w, r, frontendURL, "google_code="+url.QueryEscape(code))
 }
 
-func (s *Server) googleExchangeHandler(w http.ResponseWriter, r *http.Request) {
-	if s.users == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "auth service unavailable"})
+func (h *Handler) GoogleExchange(w http.ResponseWriter, r *http.Request) {
+	if h.Users == nil {
+		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "auth service unavailable"})
 		return
 	}
 	var request loginCodeRequest
-	if err := decodeJSON(w, r, &request); err != nil {
+	if err := httpx.DecodeJSON(w, r, &request); err != nil {
 		return
 	}
-	authentication, err := s.users.ExchangeLoginCode(r.Context(), request.Code)
+	authentication, err := h.Users.ExchangeLoginCode(r.Context(), request.Code)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication code is invalid or expired"})
+		httpx.WriteJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication code is invalid or expired"})
 		return
 	}
-	writeJSON(w, http.StatusOK, authentication)
+	httpx.WriteJSON(w, http.StatusOK, authentication)
 }
 
 func fetchGoogleIdentity(ctx context.Context, token *oauth2.Token) (googleUserInfo, error) {
@@ -150,7 +149,7 @@ func fetchGoogleIdentity(ctx context.Context, token *oauth2.Token) (googleUserIn
 		return googleUserInfo{}, errors.New("Google userinfo request failed")
 	}
 	var identity googleUserInfo
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxAuthRequestBytes)).Decode(&identity); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, httpx.MaxJSONRequestBytes)).Decode(&identity); err != nil {
 		return googleUserInfo{}, err
 	}
 	return identity, nil
@@ -182,25 +181,4 @@ func envBool(name string, fallback bool) bool {
 		return fallback
 	}
 	return value == "1" || value == "true" || value == "yes"
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxAuthRequestBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON request"})
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request must contain one JSON object"})
-		return err
-	}
-	return nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
 }

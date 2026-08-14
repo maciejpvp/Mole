@@ -10,30 +10,31 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	servermiddleware "mole-control-plane/internal/server/middleware"
 )
 
 func TestGetClientIP(t *testing.T) {
 	req1, _ := http.NewRequest("GET", "/", nil)
 	req1.Header.Set("X-Forwarded-For", "203.0.113.195, 70.41.3.18")
-	if ip := GetClientIP(req1); ip != "203.0.113.195" {
+	if ip := servermiddleware.GetClientIP(req1); ip != "203.0.113.195" {
 		t.Errorf("expected 203.0.113.195, got %s", ip)
 	}
 
 	req2, _ := http.NewRequest("GET", "/", nil)
 	req2.Header.Set("X-Real-IP", "198.51.100.1")
-	if ip := GetClientIP(req2); ip != "198.51.100.1" {
+	if ip := servermiddleware.GetClientIP(req2); ip != "198.51.100.1" {
 		t.Errorf("expected 198.51.100.1, got %s", ip)
 	}
 
 	req3, _ := http.NewRequest("GET", "/", nil)
 	req3.RemoteAddr = "192.0.2.1:12345"
-	if ip := GetClientIP(req3); ip != "192.0.2.1" {
+	if ip := servermiddleware.GetClientIP(req3); ip != "192.0.2.1" {
 		t.Errorf("expected 192.0.2.1, got %s", ip)
 	}
 }
 
 func TestIPBlocker(t *testing.T) {
-	blocker := NewIPBlocker("10.0.0.1,192.168.1.0/24", "")
+	blocker := servermiddleware.NewIPBlocker("10.0.0.1,192.168.1.0/24", "")
 
 	if !blocker.IsBlocked("10.0.0.1") {
 		t.Errorf("10.0.0.1 should be blocked")
@@ -45,7 +46,7 @@ func TestIPBlocker(t *testing.T) {
 		t.Errorf("10.0.0.2 should not be blocked")
 	}
 
-	whitelistBlocker := NewIPBlocker("", "172.16.0.0/12")
+	whitelistBlocker := servermiddleware.NewIPBlocker("", "172.16.0.0/12")
 	if whitelistBlocker.IsBlocked("172.16.5.10") {
 		t.Errorf("172.16.5.10 is whitelisted, should not be blocked")
 	}
@@ -55,8 +56,7 @@ func TestIPBlocker(t *testing.T) {
 }
 
 func TestRateLimiterMiddleware(t *testing.T) {
-	limiter := NewIPRateLimiter(rate.Limit(2), 2) // 2 req/sec, burst 2
-	defer close(limiter.stopChan)
+	limiter := servermiddleware.NewIPRateLimiter(rate.Limit(2), 2) // 2 req/sec, burst 2
 
 	handler := limiter.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -90,7 +90,7 @@ func TestRateLimiterMiddleware(t *testing.T) {
 }
 
 func TestSecurityHeadersMiddleware(t *testing.T) {
-	handler := SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := servermiddleware.SecurityHeadersMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -178,7 +178,7 @@ func TestAuthRateLimitingIntegration(t *testing.T) {
 }
 
 func TestMaxRequestBodySizeMiddleware(t *testing.T) {
-	middleware := MaxRequestBodySizeMiddleware(10) // 10 bytes max
+	middleware := servermiddleware.MaxRequestBodySizeMiddleware(10) // 10 bytes max
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buf := make([]byte, 100)
 		_, err := r.Body.Read(buf)

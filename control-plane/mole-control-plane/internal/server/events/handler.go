@@ -1,4 +1,4 @@
-package server
+package events
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"mole-control-plane/internal/server/auth"
+	"mole-control-plane/internal/server/httpx"
 	"mole-control-plane/internal/tunnel"
 )
 
@@ -70,14 +72,14 @@ func (b *Broker) Broadcast(userID string, event Event) {
 	}
 }
 
-func (s *Server) eventsHandler(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Events(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "streaming unsupported"})
+		httpx.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "streaming unsupported"})
 		return
 	}
 
-	account := userFromContext(r.Context())
+	account := auth.UserFromContext(r.Context())
 
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
@@ -89,13 +91,13 @@ func (s *Server) eventsHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ch := s.broker.Subscribe(account.ID)
-	defer s.broker.Unsubscribe(account.ID, ch)
+	ch := h.Broker.Subscribe(account.ID)
+	defer h.Broker.Unsubscribe(account.ID, ch)
 
 	// Send initial snapshot
-	profile, err := s.users.Profile(r.Context(), account.ID)
+	profile, err := h.Users.Profile(r.Context(), account.ID)
 	if err == nil {
-		s.writeSSE(w, flusher, "tunnel_update", profile)
+		h.writeSSE(w, flusher, "tunnel_update", profile)
 	}
 
 	ticker := time.NewTicker(15 * time.Second)
@@ -109,7 +111,7 @@ func (s *Server) eventsHandler(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			s.writeSSE(w, flusher, event.Name, event.Data)
+			h.writeSSE(w, flusher, event.Name, event.Data)
 		case <-ticker.C:
 			_, _ = fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
@@ -117,7 +119,7 @@ func (s *Server) eventsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) writeSSE(w http.ResponseWriter, flusher http.Flusher, eventName string, data any) {
+func (h *Handler) writeSSE(w http.ResponseWriter, flusher http.Flusher, eventName string, data any) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return
@@ -126,44 +128,44 @@ func (s *Server) writeSSE(w http.ResponseWriter, flusher http.Flusher, eventName
 	flusher.Flush()
 }
 
-func (s *Server) notifyUserUpdate(ctx context.Context, userID string) {
-	if userID == "" || s.users == nil || s.broker == nil {
+func (h *Handler) notifyUserUpdate(ctx context.Context, userID string) {
+	if userID == "" || h.Users == nil || h.Broker == nil {
 		return
 	}
-	profile, err := s.users.Profile(ctx, userID)
+	profile, err := h.Users.Profile(ctx, userID)
 	if err != nil {
 		return
 	}
-	s.broker.Broadcast(userID, Event{
+	h.Broker.Broadcast(userID, Event{
 		Name: "tunnel_update",
 		Data: profile,
 	})
 }
 
-func (s *Server) notifyUserUpdateForTunnel(ctx context.Context, tunnelID string) {
-	if s.tunnels == nil {
+func (h *Handler) notifyUserUpdateForTunnel(ctx context.Context, tunnelID string) {
+	if h.Tunnels == nil {
 		return
 	}
-	userID, err := s.tunnels.GetUserIDForTunnel(ctx, tunnelID)
+	userID, err := h.Tunnels.GetUserIDForTunnel(ctx, tunnelID)
 	if err != nil || userID == "" {
 		return
 	}
-	s.notifyUserUpdate(ctx, userID)
+	h.notifyUserUpdate(ctx, userID)
 }
 
-func (s *Server) notifyUserUpdateForUsage(ctx context.Context, updates []tunnel.UsageUpdate) {
-	if s.tunnels == nil {
+func (h *Handler) notifyUserUpdateForUsage(ctx context.Context, updates []tunnel.UsageUpdate) {
+	if h.Tunnels == nil {
 		return
 	}
 	tunnelIDs := make([]string, len(updates))
 	for i, u := range updates {
 		tunnelIDs[i] = u.TunnelID
 	}
-	userIDs, err := s.tunnels.GetUserIDsForTunnels(ctx, tunnelIDs)
+	userIDs, err := h.Tunnels.GetUserIDsForTunnels(ctx, tunnelIDs)
 	if err != nil {
 		return
 	}
 	for _, userID := range userIDs {
-		s.notifyUserUpdate(ctx, userID)
+		h.notifyUserUpdate(ctx, userID)
 	}
 }

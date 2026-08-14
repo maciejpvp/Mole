@@ -1,4 +1,4 @@
-package server
+package middleware
 
 import (
 	"net"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/cors"
 	"golang.org/x/time/rate"
+	"mole-control-plane/internal/server/httpx"
 )
 
 // IPNetOrIP represents either a single IP address or an IP net subnet.
@@ -135,7 +136,7 @@ func (b *IPBlocker) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clientIP := GetClientIP(r)
 		if b.IsBlocked(clientIP) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
+			httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": "access denied"})
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -215,7 +216,7 @@ func (lim *IPRateLimiter) Handler(next http.Handler) http.Handler {
 			w.Header().Set("Retry-After", "60")
 			w.Header().Set("X-RateLimit-Limit", strconv.FormatFloat(float64(lim.r), 'f', -1, 64))
 			w.Header().Set("X-RateLimit-Remaining", "0")
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			httpx.WriteJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
 			return
 		}
 

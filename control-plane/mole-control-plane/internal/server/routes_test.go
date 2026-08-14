@@ -103,3 +103,13 @@ func TestPlansRouteRequiresAuthentication(t *testing.T) {
 		t.Errorf("expected status unauthorized; got %v", resp.Status)
 	}
 }
+
+func TestEventsRoutesRequireAuthentication(t *testing.T) {
+	for _, route := range []string{"/api/v1/tunnels/events", "/api/v1/events"} {
+		recorder := httptest.NewRecorder()
+		(&Server{}).RegisterRoutes().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, route, nil))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Errorf("route %s: expected status unauthorized, got %d", route, recorder.Code)
+		}
+	}
+}

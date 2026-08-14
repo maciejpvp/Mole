@@ -1,97 +1,77 @@
 package server
 
 import (
-	"encoding/json"
-	"log"
-	"net/http"
-	"os"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"golang.org/x/time/rate"
+	serveradmin "mole-control-plane/internal/server/admin"
+	serverauth "mole-control-plane/internal/server/auth"
+	serverbilling "mole-control-plane/internal/server/billing"
+	"mole-control-plane/internal/server/events"
+	servermiddleware "mole-control-plane/internal/server/middleware"
+	servertunnels "mole-control-plane/internal/server/tunnels"
+	serverusers "mole-control-plane/internal/server/users"
+	"net/http"
+	"os"
 )
 
 func (s *Server) RegisterRoutes() http.Handler {
+	if s.auth == nil {
+		s.auth = serverauth.NewHandler(nil)
+	}
+	if s.billing == nil {
+		s.billing = serverbilling.NewHandler(nil)
+	}
+	if s.admin == nil {
+		s.admin = serveradmin.NewHandler(nil, nil)
+	}
+	if s.events == nil {
+		s.events = events.NewHandler(nil, nil, events.NewBroker())
+	}
+	if s.tunnels == nil {
+		s.tunnels = servertunnels.NewHandler(nil, nil, s.events)
+	}
+	if s.usersHandler == nil {
+		s.usersHandler = serverusers.NewHandler(nil, nil, s.events)
+	}
 	r := chi.NewRouter()
-
-	// 1. Core logger, security headers & max body size limit (1MB default)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(SecurityHeadersMiddleware)
-	maxBodyBytes := GetEnvInt64("MAX_REQUEST_BODY_BYTES", 1<<20)
-	r.Use(MaxRequestBodySizeMiddleware(maxBodyBytes))
-
-	// 2. IP Blocking / Whitelisting middleware
-	ipBlocker := NewIPBlocker(os.Getenv("BLOCKED_IPS"), os.Getenv("ALLOWED_IPS"))
-	r.Use(ipBlocker.Handler)
-
-	// 3. Proper CORS configuration
-	r.Use(cors.Handler(BuildCORSConfig()))
-
-	// 4. Global API Rate Limiter
-	globalRPS := GetEnvFloat("RATE_LIMIT_RPS", 20.0)
-	globalBurst := GetEnvInt("RATE_LIMIT_BURST", 50)
-	globalLimiter := NewIPRateLimiter(rate.Limit(globalRPS), globalBurst)
-	r.Use(globalLimiter.Handler)
-
-	// Unrestricted / Health check endpoint
+	r.Use(middleware.Logger, middleware.Recoverer, servermiddleware.SecurityHeadersMiddleware)
+	r.Use(servermiddleware.MaxRequestBodySizeMiddleware(servermiddleware.GetEnvInt64("MAX_REQUEST_BODY_BYTES", 1<<20)))
+	r.Use(servermiddleware.NewIPBlocker(os.Getenv("BLOCKED_IPS"), os.Getenv("ALLOWED_IPS")).Handler)
+	r.Use(cors.Handler(servermiddleware.BuildCORSConfig()))
+	r.Use(servermiddleware.NewIPRateLimiter(rate.Limit(servermiddleware.GetEnvFloat("RATE_LIMIT_RPS", 20)), servermiddleware.GetEnvInt("RATE_LIMIT_BURST", 50)).Handler)
 	r.Get("/", s.HelloWorldHandler)
 	r.Get("/health", s.healthHandler)
-	r.Post("/api/v1/billing/webhook", s.stripeWebhookHandler)
-
-	// Auth Subrouter with Stricter Rate Limiter
-	authRPS := GetEnvFloat("AUTH_RATE_LIMIT_RPS", 2.0)
-	authBurst := GetEnvInt("AUTH_RATE_LIMIT_BURST", 5)
-	authLimiter := NewIPRateLimiter(rate.Limit(authRPS), authBurst)
-
+	r.Post("/api/v1/billing/webhook", s.billing.StripeWebhook)
+	authLimiter := servermiddleware.NewIPRateLimiter(rate.Limit(servermiddleware.GetEnvFloat("AUTH_RATE_LIMIT_RPS", 2)), servermiddleware.GetEnvInt("AUTH_RATE_LIMIT_BURST", 5))
 	r.Route("/api/v1/auth", func(r chi.Router) {
 		r.Use(authLimiter.Handler)
-		r.Get("/google/start", s.googleStartHandler)
-		r.Get("/google/callback", s.googleCallbackHandler)
-		r.Post("/google/exchange", s.googleExchangeHandler)
+		r.Get("/google/start", s.auth.GoogleStart)
+		r.Get("/google/callback", s.auth.GoogleCallback)
+		r.Post("/google/exchange", s.auth.GoogleExchange)
 	})
-
 	r.Group(func(r chi.Router) {
-		r.Use(s.requireAuthentication)
-		r.Get("/api/v1/user/me", s.currentUserHandler)
-		r.Get("/api/v1/plans", s.listPlansHandler)
-		r.Get("/api/v1/tunnels/events", s.eventsHandler)
-		r.Get("/api/v1/events", s.eventsHandler)
-		r.Post("/api/v1/tunnels", s.createTunnelHandler)
-		r.Delete("/api/v1/tunnels/{tunnelID}", s.deleteTunnelHandler)
-		r.Post("/api/v1/billing/card-validation/setup", s.createCardValidationHandler)
-		r.Post("/api/v1/billing/card-validation/confirm", s.confirmCardValidationHandler)
+		r.Use(serverauth.RequireAuthentication(s.users))
+		r.Get("/api/v1/user/me", s.usersHandler.CurrentUser)
+		r.Get("/api/v1/plans", s.usersHandler.ListPlans)
+		r.Get("/api/v1/tunnels/events", s.events.Events)
+		r.Get("/api/v1/events", s.events.Events)
+		r.Post("/api/v1/tunnels", s.tunnels.Create)
+		r.Delete("/api/v1/tunnels/{tunnelID}", s.tunnels.Delete)
+		r.Post("/api/v1/billing/card-validation/setup", s.billing.CreateCardValidation)
+		r.Post("/api/v1/billing/card-validation/confirm", s.billing.ConfirmCardValidation)
 	})
 	r.Route("/api/v1/admin", func(r chi.Router) {
-		r.Use(s.requireAuthentication)
-		r.Use(requireAdministrator)
-		r.Get("/users", s.adminListUsersHandler)
-		r.Patch("/users/{userId}/plan", s.adminChangeUserPlanHandler)
-		r.Post("/users/{userId}/reset-limits", s.adminResetUserLimitsHandler)
-		r.Patch("/users/{userId}/admin", s.adminSetUserAdminHandler)
-		r.Patch("/users/{userId}/ban", s.adminSetUserBannedHandler)
+		r.Use(serverauth.RequireAuthentication(s.users), serverauth.RequireAdministrator)
+		r.Get("/users", s.admin.ListUsers)
+		r.Patch("/users/{userId}/plan", s.admin.ChangeUserPlan)
+		r.Post("/users/{userId}/reset-limits", s.admin.ResetUserLimits)
+		r.Patch("/users/{userId}/admin", s.admin.SetUserAdmin)
+		r.Patch("/users/{userId}/ban", s.admin.SetUserBanned)
 	})
-	r.Post("/api/v1/tunnels/connect", s.connectTunnelHandler)
-	r.Post("/internal/v1/tunnels/usage", s.syncTunnelUsageHandler)
-	r.Post("/internal/v1/tunnels/status", s.syncTunnelConnectionStatusHandler)
-
+	r.Post("/api/v1/tunnels/connect", s.tunnels.Connect)
+	r.Post("/internal/v1/tunnels/usage", s.tunnels.SyncUsage)
+	r.Post("/internal/v1/tunnels/status", s.tunnels.SyncConnectionStatus)
 	return r
-}
-
-func (s *Server) HelloWorldHandler(w http.ResponseWriter, r *http.Request) {
-	resp := make(map[string]string)
-	resp["message"] = "Hello World"
-
-	jsonResp, err := json.Marshal(resp)
-	if err != nil {
-		log.Fatalf("error handling JSON marshal. Err: %v", err)
-	}
-
-	_, _ = w.Write(jsonResp)
-}
-
-func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
-	jsonResp, _ := json.Marshal(s.db.Health())
-	_, _ = w.Write(jsonResp)
 }
