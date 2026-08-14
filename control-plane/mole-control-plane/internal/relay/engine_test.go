@@ -1,9 +1,11 @@
-package orchestrator
+package relay
 
 import (
+	"context"
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestProvisionAndDeprovision(t *testing.T) {
@@ -128,4 +130,32 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func TestStartDeliversConnectionStatusToCallback(t *testing.T) {
+	port := freeTCPPort(t)
+	engine, err := New(Config{ControlPort: port, PortMin: port + 1, PortMax: port + 1, PublicHost: "tunnels.example.test"})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	statuses := make(chan ConnectionStatusUpdate, 1)
+	engine.SetCallbacks(Callbacks{SetConnectionStatus: func(_ context.Context, update ConnectionStatusUpdate) error {
+		statuses <- update
+		return nil
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := engine.Start(ctx); err != nil {
+		t.Fatalf("start engine: %v", err)
+	}
+	defer engine.Stop()
+	engine.recordConnectionStatus("tunnel-1", "active")
+	select {
+	case update := <-statuses:
+		if update.TunnelID != "tunnel-1" || update.Status != "active" {
+			t.Fatalf("unexpected status update: %+v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for direct status callback")
+	}
 }

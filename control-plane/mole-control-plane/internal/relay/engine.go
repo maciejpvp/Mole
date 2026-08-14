@@ -1,6 +1,7 @@
-package orchestrator
+package relay
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
@@ -35,6 +36,15 @@ type Config struct {
 	PublicHost               string
 	GlobalTransferLimitBytes int64
 	GlobalTransferStateDir   string
+	UsageSyncInterval        time.Duration
+}
+
+// Callbacks persist relay state in the co-located control plane. They avoid
+// an internal HTTP hop while keeping the relay independent of database and
+// HTTP packages.
+type Callbacks struct {
+	ApplyUsage          func(context.Context, []UsageUpdate) ([]string, error)
+	SetConnectionStatus func(context.Context, ConnectionStatusUpdate) error
 }
 
 type ProvisionRequest struct {
@@ -83,10 +93,21 @@ type Engine struct {
 	globalTransferState      *transferStateStore
 
 	connectionStatusUpdates chan ConnectionStatusUpdate
+	callbacks               Callbacks
+	callbacksMu             sync.RWMutex
 
 	controlLn net.Listener
 	stopCh    chan struct{}
 	stopOnce  sync.Once
+	startOnce sync.Once
+	startErr  error
+}
+
+// SetCallbacks configures direct persistence callbacks before Start.
+func (e *Engine) SetCallbacks(callbacks Callbacks) {
+	e.callbacksMu.Lock()
+	e.callbacks = callbacks
+	e.callbacksMu.Unlock()
 }
 
 type userUsage struct {
@@ -153,8 +174,8 @@ func New(cfg Config) (*Engine, error) {
 	return engine, nil
 }
 
-// ConnectionStatusUpdates returns relay-authenticated connection changes in
-// order. The control-plane sync worker is the sole consumer.
+// ConnectionStatusUpdates exposes status changes when no direct callback is
+// configured. It remains useful to embedders that provide their own worker.
 func (e *Engine) ConnectionStatusUpdates() <-chan ConnectionStatusUpdate {
 	return e.connectionStatusUpdates
 }
@@ -167,21 +188,70 @@ func (e *Engine) recordConnectionStatus(tunnelID, status string) {
 	}
 }
 
-// Run starts the fixed control listener. Public listeners are created by
-// Provision and removed by Deprovision.
-func (e *Engine) Run() error {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", e.cfg.ControlPort))
-	if err != nil {
-		return fmt.Errorf("control listener: %w", err)
-	}
-	e.mu.Lock()
-	e.controlLn = ln
-	e.mu.Unlock()
-	log.Printf("[orchestrator] control listener up on %s", ln.Addr())
+// Start begins the control listener and direct callback workers. Public
+// listeners are created by Provision and removed by Deprovision.
+func (e *Engine) Start(ctx context.Context) error {
+	e.startOnce.Do(func() {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", e.cfg.ControlPort))
+		if err != nil {
+			e.startErr = fmt.Errorf("control listener: %w", err)
+			return
+		}
+		e.mu.Lock()
+		e.controlLn = ln
+		e.mu.Unlock()
+		log.Printf("[relay] control listener up on %s", ln.Addr())
+		go e.acceptControl(ln)
+		go e.runCallbacks(ctx)
+	})
+	return e.startErr
+}
 
-	go e.acceptControl(ln)
-	<-e.stopCh
-	return nil
+func (e *Engine) runCallbacks(ctx context.Context) {
+	e.callbacksMu.RLock()
+	callbacks := e.callbacks
+	e.callbacksMu.RUnlock()
+	if callbacks.SetConnectionStatus != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case update := <-e.connectionStatusUpdates:
+					if err := callbacks.SetConnectionStatus(ctx, update); err != nil {
+						log.Printf("[relay] persist connection status for %s: %v", update.TunnelID, err)
+					}
+				}
+			}
+		}()
+	}
+	if callbacks.ApplyUsage == nil {
+		return
+	}
+	interval := e.cfg.UsageSyncInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			updates := e.CollectUsage(time.Now())
+			if len(updates) == 0 {
+				continue
+			}
+			stops, err := callbacks.ApplyUsage(ctx, updates)
+			if err != nil {
+				log.Printf("[relay] persist usage: %v", err)
+				continue
+			}
+			e.AcknowledgeUsage(updates)
+			e.StopTunnels(stops)
+		}
+	}
 }
 
 func (e *Engine) Stop() {

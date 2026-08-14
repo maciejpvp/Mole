@@ -6,11 +6,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -604,65 +602,4 @@ func (s *Service) GetUserIDsForTunnels(ctx context.Context, tunnelIDs []string) 
 		}
 	}
 	return userIDs, nil
-}
-
-// HTTPProvisioner calls the authenticated tunnel-server management API.
-type HTTPProvisioner struct {
-	baseURL string
-	token   string
-	client  *http.Client
-}
-
-func NewHTTPProvisionerFromEnv() (*HTTPProvisioner, error) {
-	baseURL := strings.TrimRight(os.Getenv("TUNNEL_SERVER_URL"), "/")
-	token := os.Getenv("TUNNEL_SERVER_API_TOKEN")
-	if baseURL == "" || token == "" {
-		return nil, errors.New("TUNNEL_SERVER_URL and TUNNEL_SERVER_API_TOKEN are required")
-	}
-	return &HTTPProvisioner{baseURL: baseURL, token: token, client: &http.Client{Timeout: 10 * time.Second}}, nil
-}
-
-func (p *HTTPProvisioner) Provision(ctx context.Context, request ProvisionRequest) (ProvisionResponse, error) {
-	var response ProvisionResponse
-	if err := p.doJSON(ctx, http.MethodPost, "/v1/tunnels", request, &response); err != nil {
-		return ProvisionResponse{}, err
-	}
-	return response, nil
-}
-
-func (p *HTTPProvisioner) Deprovision(ctx context.Context, tunnelID string) error {
-	return p.doJSON(ctx, http.MethodDelete, "/v1/tunnels/"+tunnelID, nil, nil)
-}
-
-func (p *HTTPProvisioner) doJSON(ctx context.Context, method, path string, body any, destination any) error {
-	var reader *strings.Reader
-	if body == nil {
-		reader = strings.NewReader("")
-	} else {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = strings.NewReader(string(encoded))
-	}
-	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+path, reader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("tunnel server returned %s", resp.Status)
-	}
-	if destination != nil {
-		if err := json.NewDecoder(resp.Body).Decode(destination); err != nil {
-			return err
-		}
-	}
-	return nil
 }

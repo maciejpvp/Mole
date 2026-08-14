@@ -1,4 +1,4 @@
-package orchestrator
+package relay
 
 import (
 	"encoding/json"

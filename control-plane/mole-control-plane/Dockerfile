@@ -17,5 +17,7 @@ WORKDIR /app
 COPY --from=builder /out/mole-control-plane /app/mole-control-plane
 
 EXPOSE 8080
+EXPOSE 9000
+EXPOSE 10000-10100
 
 ENTRYPOINT ["/app/mole-control-plane"]

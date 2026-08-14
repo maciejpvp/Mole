@@ -71,7 +71,5 @@ func (s *Server) RegisterRoutes() http.Handler {
 		r.Patch("/users/{userId}/ban", s.admin.SetUserBanned)
 	})
 	r.Post("/api/v1/tunnels/connect", s.tunnels.Connect)
-	r.Post("/internal/v1/tunnels/usage", s.tunnels.SyncUsage)
-	r.Post("/internal/v1/tunnels/status", s.tunnels.SyncConnectionStatus)
 	return r
 }

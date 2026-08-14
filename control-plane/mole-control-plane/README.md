@@ -121,17 +121,7 @@ back to `inactive` when that client disconnects.
 
 For the local development configuration, use `--mole-url http://127.0.0.1:8080`.
 
-Set these control-plane environment variables to enable provisioning:
-
-```bash
-TUNNEL_SERVER_URL=http://relay-private-address:9001
-TUNNEL_SERVER_API_TOKEN=<same value as MOLE_SERVER_API_TOKEN on the relay>
-```
-
-The relay image requires `MOLE_SERVER_API_TOKEN`, `MOLE_PUBLIC_HOST`, and
-`MOLE_CONTROL_PLANE_URL`. Its public tunnel-port range defaults to `10000-10100`
-for both TCP and UDP; expose that range in the host firewall as needed. Keep the
-management API on a private network or restrict access to the control plane.
+The relay runs inside the control-plane process. Configure its public endpoint and listener range with `MOLE_PUBLIC_HOST`, `MOLE_CONTROL_PORT`, `MOLE_TUNNEL_PORT_MIN`, and `MOLE_TUNNEL_PORT_MAX`. Expose the TCP and UDP tunnel range in the host firewall as needed.
 
 ## Local development
 
@@ -140,19 +130,16 @@ the `.env` file each component reads at startup:
 
 ```bash
 cp control-plane/mole-control-plane/.env.dev control-plane/mole-control-plane/.env
-cp server/.env.dev server/.env
 ```
 
-Start PostgreSQL and the two services in separate terminals:
+Start PostgreSQL and the combined control-plane/relay service:
 
 ```bash
 cd control-plane/mole-control-plane && docker compose up -d
 cd control-plane/mole-control-plane && go run ./cmd/api
-cd server && go run ./cmd/server
 ```
 
-The development files share a relay API token and bind everything to localhost.
-Do not use their token values outside local development.
+The control plane binds the API and relay listeners; do not expose development settings to production.
 
 Clean up binary from the last build:
 ```bash
