@@ -8,6 +8,8 @@
 .env
 .env.local
 .env.*.local
+# Build-time values for scripts/build-and-push.sh
+.env.build
 # Allow .env.example, .env.development, .env.production (no secrets)
 !.env.example
 !.env.development
@@ -47,13 +49,6 @@ pnpm-debug.log*
 go.work
 go.work.sum
 tmp/
-
-# ------------------------------------------------------------------------------
-# Docker leftovers (zero-byte files from docker pull / accidental output)
-# ------------------------------------------------------------------------------
-71665c624014
-9b5afd4b90ee
-Using
 
 # ------------------------------------------------------------------------------
 # OS / Editor

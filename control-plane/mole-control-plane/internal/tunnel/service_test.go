@@ -1,7 +1,10 @@
 package tunnel
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"testing"
 	"time"
 
@@ -42,6 +45,12 @@ type mockProvisioner struct {
 	publicHost   string
 	controlPort  int
 	err          error
+
+	// Restore behaviour.
+	restored       []RestoreRequest
+	restoreRebound bool
+	restorePort    int
+	restoreErr     error
 }
 
 func (m *mockProvisioner) Provision(ctx context.Context, req ProvisionRequest) (ProvisionResponse, error) {
@@ -55,8 +64,121 @@ func (m *mockProvisioner) Provision(ctx context.Context, req ProvisionRequest) (
 	}, nil
 }
 
+func (m *mockProvisioner) Restore(ctx context.Context, req RestoreRequest) (RestoreResponse, error) {
+	m.restored = append(m.restored, req)
+	if m.restoreErr != nil {
+		return RestoreResponse{}, m.restoreErr
+	}
+	port := req.OutboundPort
+	if m.restoreRebound {
+		port = m.restorePort
+	}
+	return RestoreResponse{OutboundPort: port, Rebound: m.restoreRebound}, nil
+}
+
 func (m *mockProvisioner) Deprovision(ctx context.Context, tunnelID string) error {
 	return nil
+}
+
+// restorableRows builds the row set Restore's query returns for one tunnel.
+func restorableRows(tunnelID string, proto int16, outboundPort int, tokenHash []byte) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{
+		"id", "user_id", "proto", "outbound_port", "connection_token_hash",
+		"monthly_minutes", "monthly_transfer_bytes",
+		"monthly_minutes_used", "monthly_transfer_bytes_used",
+	}).AddRow(tunnelID, "test-user-id", proto, outboundPort, tokenHash, nil, nil, 0, 0)
+}
+
+func TestRestoreDemotesStaleTunnelsAndRebuildsRelay(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("unexpected error creating sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	provisioner := &mockProvisioner{}
+	svc := NewService(db, provisioner)
+
+	tokenHash := make([]byte, sha256.Size)
+	for i := range tokenHash {
+		tokenHash[i] = byte(i + 1)
+	}
+
+	mock.ExpectExec(`UPDATE tunnels SET status = 'inactive', started_at = NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`FROM tunnels t`).
+		WillReturnRows(restorableRows("tunnel-1", 6, 10001, tokenHash))
+
+	if err := svc.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if len(provisioner.restored) != 1 {
+		t.Fatalf("expected 1 restored tunnel, got %d", len(provisioner.restored))
+	}
+	request := provisioner.restored[0]
+	if request.TunnelID != "tunnel-1" || request.Protocol != "tcp" || request.OutboundPort != 10001 {
+		t.Fatalf("unexpected restore request: %+v", request)
+	}
+	if !bytes.Equal(request.TokenHash[:], tokenHash) {
+		t.Fatalf("token hash was not carried into the restore request")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("there were unfulfilled expectations: %s", err)
+	}
+}
+
+func TestRestorePersistsReboundPort(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("unexpected error creating sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	svc := NewService(db, &mockProvisioner{restoreRebound: true, restorePort: 10077})
+
+	mock.ExpectExec(`UPDATE tunnels SET status = 'inactive', started_at = NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`FROM tunnels t`).
+		WillReturnRows(restorableRows("tunnel-1", 17, 10001, make([]byte, sha256.Size)))
+	mock.ExpectExec(`UPDATE tunnels SET outbound_port = \$1 WHERE id = \$2`).
+		WithArgs(10077, "tunnel-1").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	if err := svc.Restore(context.Background()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("there were unfulfilled expectations: %s", err)
+	}
+}
+
+func TestRestoreSurvivesPerTunnelFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("unexpected error creating sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	provisioner := &mockProvisioner{restoreErr: errors.New("no public ports available")}
+	svc := NewService(db, provisioner)
+
+	rows := restorableRows("tunnel-1", 6, 10001, make([]byte, sha256.Size)).
+		AddRow("tunnel-2", "test-user-id", int16(6), 10002, make([]byte, sha256.Size), nil, nil, 0, 0)
+
+	mock.ExpectExec(`UPDATE tunnels SET status = 'inactive', started_at = NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`FROM tunnels t`).WillReturnRows(rows)
+
+	// A tunnel that cannot be restored must not abort the rest of startup.
+	if err := svc.Restore(context.Background()); err != nil {
+		t.Fatalf("restore should not fail when an individual tunnel does: %v", err)
+	}
+	if len(provisioner.restored) != 2 {
+		t.Fatalf("expected both tunnels to be attempted, got %d", len(provisioner.restored))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("there were unfulfilled expectations: %s", err)
+	}
 }
 
 func TestCreateTunnelEnforcesMaxActiveTunnels(t *testing.T) {

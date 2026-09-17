@@ -1,0 +1,16 @@
+# Without this, `COPY . .` copies a host node_modules/ into the image AFTER
+# `npm ci`, overwriting correct dependencies with whatever the host built —
+# possibly for a different platform.
+node_modules
+dist
+dist-ssr
+
+.git
+.gitignore
+*.local
+.env.local
+.env.*.local
+
+Dockerfile
+.dockerignore
+README.md

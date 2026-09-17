@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -42,12 +43,14 @@ type Server struct {
 type Application struct {
 	HTTPServer *http.Server
 	relay      *relay.Engine
+	tunnels    *tunnel.Service
 }
 
 func NewApplication() *Application {
 	port, _ := strconv.Atoi(os.Getenv("PORT"))
 	db := database.New()
 	users := user.NewService(db.DB())
+	promoteBootstrapAdmin(users)
 
 	relayEngine, setupErr := newRelayFromEnv()
 	if setupErr != nil {
@@ -95,6 +98,7 @@ func NewApplication() *Application {
 	return &Application{
 		HTTPServer: &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: api.RegisterRoutes(), IdleTimeout: time.Minute, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second},
 		relay:      relayEngine,
+		tunnels:    tunnelService,
 	}
 }
 
@@ -105,6 +109,13 @@ func (a *Application) Start(ctx context.Context) error {
 	if a.relay == nil {
 		return nil
 	}
+	// Rebuild the relay registry before the control listener accepts, so a
+	// reconnecting client never races a half-built registry and gets rejected.
+	if a.tunnels != nil {
+		if err := a.tunnels.Restore(ctx); err != nil {
+			log.Printf("restore tunnels: %v", err)
+		}
+	}
 	return a.relay.Start(ctx)
 }
 
@@ -113,6 +124,29 @@ func (a *Application) Shutdown(ctx context.Context) error {
 		a.relay.Stop()
 	}
 	return a.HTTPServer.Shutdown(ctx)
+}
+
+// promoteBootstrapAdmin grants administrator permission to BOOTSTRAP_ADMIN_EMAIL
+// at startup, so a fresh deployment can reach the admin API without hand-written
+// SQL. Never fatal: a typo must not take the API down. The account may not exist
+// yet on a first deploy, in which case user.LoginWithGoogle promotes it at
+// sign-in instead.
+func promoteBootstrapAdmin(users *user.Service) {
+	email := strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))
+	if email == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	switch err := users.PromoteAdminByEmail(ctx, email); {
+	case errors.Is(err, user.ErrAccountUnavailable):
+		log.Printf("bootstrap admin: no account for %q yet; it will be promoted on first Google sign-in", email)
+	case err != nil:
+		log.Printf("bootstrap admin: %v", err)
+	default:
+		log.Printf("bootstrap admin: %q now has administrator permission", email)
+	}
 }
 
 func newRelayFromEnv() (*relay.Engine, error) {

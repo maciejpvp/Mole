@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -26,6 +27,7 @@ var (
 // Provisioner allocates and releases public listeners on a tunnel server.
 type Provisioner interface {
 	Provision(context.Context, ProvisionRequest) (ProvisionResponse, error)
+	Restore(context.Context, RestoreRequest) (RestoreResponse, error)
 	Deprovision(context.Context, string) error
 }
 
@@ -73,6 +75,25 @@ type ProvisionResponse struct {
 	OutboundPort int    `json:"outbound_port"`
 	PublicHost   string `json:"public_host"`
 	ControlPort  int    `json:"control_port"`
+}
+
+// RestoreRequest rebuilds a persisted tunnel on the relay after a restart. It
+// carries the token hash because that is all the control plane stores.
+type RestoreRequest struct {
+	TunnelID                  string            `json:"tunnel_id"`
+	UserID                    string            `json:"user_id"`
+	Protocol                  string            `json:"protocol"`
+	TokenHash                 [sha256.Size]byte `json:"-"`
+	OutboundPort              int               `json:"outbound_port"`
+	MonthlyMinutesLimit       *int64            `json:"monthly_minutes_limit"`
+	MonthlyTransferBytesLimit *int64            `json:"monthly_transfer_bytes_limit"`
+	MonthlyMinutesUsed        int64             `json:"monthly_minutes_used"`
+	MonthlyTransferBytesUsed  int64             `json:"monthly_transfer_bytes_used"`
+}
+
+type RestoreResponse struct {
+	OutboundPort int  `json:"outbound_port"`
+	Rebound      bool `json:"rebound"`
 }
 
 type UsageUpdate struct {
@@ -202,6 +223,102 @@ func (s *Service) Create(ctx context.Context, userID string, input CreateInput) 
 		ServerAddress:   net.JoinHostPort(provisioned.PublicHost, strconv.Itoa(provisioned.ControlPort)),
 		Token:           connectionToken,
 	}, nil
+}
+
+// Restore rebuilds the relay's in-memory tunnel registry from the database at
+// startup. The relay keeps no state across restarts, so without this every
+// persisted tunnel would fail token authentication and have no public listener
+// — the client's reconnect loop would spin forever against a tunnel the
+// control plane still reports as valid.
+//
+// It never fails startup: a tunnel that cannot be restored is logged and
+// skipped so one bad row cannot take the whole relay down.
+func (s *Service) Restore(ctx context.Context) error {
+	if s.provisioner == nil {
+		return ErrUnavailable
+	}
+
+	// No client survives a restart, so any row left 'active' is stale. Demoting
+	// them first also stops ghost rows counting against max_active_tunnels.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE tunnels SET status = 'inactive', started_at = NULL
+		WHERE status = 'active'`); err != nil {
+		return fmt.Errorf("demote stale active tunnels: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.id, t.user_id, t.proto, t.outbound_port, t.connection_token_hash,
+			p.monthly_minutes, p.monthly_transfer_bytes,
+			u.monthly_minutes_used, u.monthly_transfer_bytes_used
+		FROM tunnels t
+		JOIN users u ON u.id = t.user_id
+		JOIN plans p ON p.id = u.plan_id
+		WHERE t.status IN ('inactive', 'active') AND u.is_banned = FALSE`)
+	if err != nil {
+		return fmt.Errorf("load tunnels for restore: %w", err)
+	}
+	defer rows.Close()
+
+	requests := make([]RestoreRequest, 0)
+	for rows.Next() {
+		var (
+			request   RestoreRequest
+			proto     int16
+			tokenHash []byte
+			minutes   sql.NullInt64
+			transfer  sql.NullInt64
+		)
+		if err := rows.Scan(
+			&request.TunnelID, &request.UserID, &proto, &request.OutboundPort, &tokenHash,
+			&minutes, &transfer, &request.MonthlyMinutesUsed, &request.MonthlyTransferBytesUsed,
+		); err != nil {
+			return fmt.Errorf("read tunnel for restore: %w", err)
+		}
+		switch proto {
+		case 6:
+			request.Protocol = "tcp"
+		case 17:
+			request.Protocol = "udp"
+		default:
+			log.Printf("[restore] tunnel %s has unsupported protocol %d; skipping", request.TunnelID, proto)
+			continue
+		}
+		if len(tokenHash) != sha256.Size {
+			log.Printf("[restore] tunnel %s has a malformed token hash; skipping", request.TunnelID)
+			continue
+		}
+		copy(request.TokenHash[:], tokenHash)
+		request.MonthlyMinutesLimit = nullInt64Pointer(minutes)
+		request.MonthlyTransferBytesLimit = nullInt64Pointer(transfer)
+		requests = append(requests, request)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate tunnels for restore: %w", err)
+	}
+
+	restored, rebound, failed := 0, 0, 0
+	for _, request := range requests {
+		response, err := s.provisioner.Restore(ctx, request)
+		if err != nil {
+			failed++
+			log.Printf("[restore] tunnel %s: %v", request.TunnelID, err)
+			continue
+		}
+		restored++
+		if !response.Rebound {
+			continue
+		}
+		rebound++
+		// Keep the database in step with the port actually bound, so the
+		// endpoint we report and the partial unique index stay consistent.
+		if _, err := s.db.ExecContext(ctx, "UPDATE tunnels SET outbound_port = $1 WHERE id = $2", response.OutboundPort, request.TunnelID); err != nil {
+			log.Printf("[restore] tunnel %s bound port %d but persisting it failed: %v", request.TunnelID, response.OutboundPort, err)
+			continue
+		}
+		log.Printf("[restore] tunnel %s moved from public port %d to %d; its endpoint changed", request.TunnelID, request.OutboundPort, response.OutboundPort)
+	}
+	log.Printf("[restore] restored %d tunnels (%d rebound, %d failed)", restored, rebound, failed)
+	return nil
 }
 
 // Delete removes a user's tunnel from the control plane and releases its

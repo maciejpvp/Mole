@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/mail"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ type Service struct {
 	db         *sql.DB
 	sessionTTL time.Duration
 	now        func() time.Time
+	// bootstrapAdminEmail names the account that is granted administrator
+	// permission automatically, so a fresh deployment has a way to reach the
+	// admin API at all. Empty disables the behaviour.
+	bootstrapAdminEmail string
 }
 
 type GoogleIdentity struct {
@@ -103,7 +108,12 @@ type Authentication struct {
 }
 
 func NewService(db *sql.DB) *Service {
-	return &Service{db: db, sessionTTL: defaultSessionTTL, now: time.Now}
+	return &Service{
+		db:                  db,
+		sessionTTL:          defaultSessionTTL,
+		now:                 time.Now,
+		bootstrapAdminEmail: strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
+	}
 }
 
 func (s *Service) ListPlans(ctx context.Context) ([]Plan, error) {
@@ -188,10 +198,46 @@ func (s *Service) LoginWithGoogle(ctx context.Context, identity GoogleIdentity) 
 			return "", fmt.Errorf("record Google login: %w", err)
 		}
 	}
+	// Promote the bootstrap administrator at sign-in as well as at startup, so a
+	// fresh deployment does not need a control-plane restart between the first
+	// login and having an admin.
+	if s.bootstrapAdminEmail != "" && email == s.bootstrapAdminEmail {
+		if _, err := tx.ExecContext(ctx, "UPDATE users SET is_admin = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1", account.ID); err != nil {
+			return "", fmt.Errorf("promote bootstrap admin: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit Google login: %w", err)
 	}
 	return account.ID, nil
+}
+
+// PromoteAdminByEmail grants administrator permission to the account with the
+// given email. It is idempotent and returns ErrAccountUnavailable when no such
+// account exists yet.
+func (s *Service) PromoteAdminByEmail(ctx context.Context, email string) error {
+	if s == nil || s.db == nil {
+		return errors.New("user database unavailable")
+	}
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if !validEmail(normalized) {
+		return ErrInvalidInput
+	}
+
+	// Unconditional SET on purpose: an `AND is_admin = FALSE` guard would make
+	// "already an admin" indistinguishable from "no such account" via ErrNoRows.
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE users SET is_admin = TRUE, updated_at = CURRENT_TIMESTAMP
+		WHERE email = $1
+		RETURNING id`, normalized).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAccountUnavailable
+	}
+	if err != nil {
+		return fmt.Errorf("promote bootstrap admin: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) nextUsername(ctx context.Context, tx *sql.Tx, email, subject string) (string, error) {

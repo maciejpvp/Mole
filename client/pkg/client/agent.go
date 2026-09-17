@@ -11,9 +11,13 @@ import (
 const (
 	signalNewConn  = byte(0x01)
 	signalStartUDP = byte(0x02)
-	roleControl    = byte(0x00)
-	roleTCPLeg     = byte(0x01)
-	roleUDPBridge  = byte(0x02)
+	// signalAuthRejected means the server refused our token: the tunnel was
+	// deleted, stopped, or never existed. Reconnecting cannot fix it.
+	signalAuthRejected = byte(0xFF)
+
+	roleControl   = byte(0x00)
+	roleTCPLeg    = byte(0x01)
+	roleUDPBridge = byte(0x02)
 
 	backoffBase = 1 * time.Second
 	backoffMax  = 30 * time.Second
@@ -200,6 +204,11 @@ func (a *Agent) readSignals(control net.Conn) {
 		case signalStartUDP:
 			logDebug("[agent] server requested UDP bridge")
 			a.dispatchUDPBridge()
+		case signalAuthRejected:
+			// Retrying is pointless — stop rather than spin silently.
+			log.Printf("[client] tunnel token rejected by server — the tunnel no longer exists or was stopped")
+			a.Stop()
+			return
 		default:
 			// Unknown signal bytes are silently discarded — keeps the relay blind.
 			logDebug("[agent] unknown signal byte 0x%02x — ignored", buf[0])

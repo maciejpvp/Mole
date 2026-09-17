@@ -29,6 +29,22 @@ func (p *RelayProvisioner) Provision(ctx context.Context, request ProvisionReque
 	return ProvisionResponse{OutboundPort: response.OutboundPort, PublicHost: response.PublicHost, ControlPort: response.ControlPort}, nil
 }
 
+func (p *RelayProvisioner) Restore(ctx context.Context, request RestoreRequest) (RestoreResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return RestoreResponse{}, err
+	}
+	response, err := p.engine.Restore(relay.RestoreRequest{
+		TunnelID: request.TunnelID, UserID: request.UserID, Protocol: request.Protocol,
+		TokenHash: request.TokenHash, OutboundPort: request.OutboundPort,
+		MonthlyMinutesLimit: request.MonthlyMinutesLimit, MonthlyTransferBytesLimit: request.MonthlyTransferBytesLimit,
+		MonthlyMinutesUsed: request.MonthlyMinutesUsed, MonthlyTransferBytesUsed: request.MonthlyTransferBytesUsed,
+	})
+	if err != nil {
+		return RestoreResponse{}, err
+	}
+	return RestoreResponse{OutboundPort: response.OutboundPort, Rebound: response.Rebound}, nil
+}
+
 func (p *RelayProvisioner) Deprovision(ctx context.Context, tunnelID string) error {
 	if err := ctx.Err(); err != nil {
 		return err

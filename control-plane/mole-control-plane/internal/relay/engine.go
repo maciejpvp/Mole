@@ -21,8 +21,13 @@ const (
 	roleTCPLeg  = byte(0x01)
 	roleUDP     = byte(0x02)
 
-	signalNewTCP    = byte(0x01)
-	signalStartUDP  = byte(0x02)
+	signalNewTCP   = byte(0x01)
+	signalStartUDP = byte(0x02)
+	// signalAuthRejected tells a client its token was refused, so it stops
+	// reconnecting instead of looping against a tunnel that no longer exists.
+	// Older clients discard unknown signal bytes, so this stays compatible.
+	signalAuthRejected = byte(0xFF)
+
 	handshakeMaxLen = 512
 	dialTimeout     = 10 * time.Second
 )
@@ -60,6 +65,30 @@ type ProvisionRequest struct {
 
 type ProvisionResponse struct {
 	OutboundPort int    `json:"outbound_port"`
+	PublicHost   string `json:"public_host"`
+	ControlPort  int    `json:"control_port"`
+}
+
+// RestoreRequest rebuilds a tunnel the control plane already persisted. It
+// carries the token hash instead of the token: the control plane stores only
+// the SHA-256 digest, which is what the engine's token map is keyed by.
+type RestoreRequest struct {
+	TunnelID                  string
+	UserID                    string
+	Protocol                  string
+	TokenHash                 [sha256.Size]byte
+	OutboundPort              int
+	MonthlyMinutesLimit       *int64
+	MonthlyTransferBytesLimit *int64
+	MonthlyMinutesUsed        int64
+	MonthlyTransferBytesUsed  int64
+}
+
+type RestoreResponse struct {
+	// OutboundPort is the port actually bound; it differs from the requested
+	// port when Rebound is true.
+	OutboundPort int    `json:"outbound_port"`
+	Rebound      bool   `json:"rebound"`
 	PublicHost   string `json:"public_host"`
 	ControlPort  int    `json:"control_port"`
 }
@@ -290,34 +319,112 @@ func (e *Engine) Provision(request ProvisionRequest) (ProvisionResponse, error) 
 		return ProvisionResponse{}, errors.New("tunnel token already exists")
 	}
 
-	item := &tunnel{
-		engine:   e,
-		id:       request.TunnelID,
-		userID:   request.UserID,
-		protocol: request.Protocol,
-		token:    tokenHash,
-		tcpLegs:  make(chan net.Conn, 64),
-		sessions: make(map[net.Conn]struct{}),
-	}
+	item := newTunnelLocked(e, request.TunnelID, request.UserID, request.Protocol, tokenHash)
 	port, err := e.bindPublicListenerLocked(item)
 	if err != nil {
 		return ProvisionResponse{}, err
 	}
 	item.port = port
-	e.tunnels[item.id] = item
-	e.tokens[tokenHash] = item
+	e.registerTunnelLocked(item, usageSeed{
+		minutesLimit:       request.MonthlyMinutesLimit,
+		transferBytesLimit: request.MonthlyTransferBytesLimit,
+		minutesUsed:        request.MonthlyMinutesUsed,
+		transferBytesUsed:  request.MonthlyTransferBytesUsed,
+	})
+	log.Printf("[orchestrator] provisioned %s tunnel %s on public port %d", item.protocol, item.id, item.port)
+	return ProvisionResponse{OutboundPort: item.port, PublicHost: e.cfg.PublicHost, ControlPort: e.cfg.ControlPort}, nil
+}
 
-	usage := e.users[request.UserID]
+// Restore rebuilds a tunnel that was provisioned before the process restarted.
+// The registry is in-memory only, so without this every persisted tunnel would
+// fail authentication and have no public listener after a restart.
+//
+// It takes the token hash rather than the token because the control plane only
+// stores the SHA-256 digest — which is exactly how the token map is keyed.
+func (e *Engine) Restore(request RestoreRequest) (RestoreResponse, error) {
+	if request.TunnelID == "" || request.UserID == "" || (request.Protocol != "tcp" && request.Protocol != "udp") || request.MonthlyMinutesUsed < 0 || request.MonthlyTransferBytesUsed < 0 {
+		return RestoreResponse{}, errors.New("invalid tunnel restore request")
+	}
+	if request.TokenHash == ([sha256.Size]byte{}) {
+		return RestoreResponse{}, errors.New("invalid tunnel restore request: empty token hash")
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.globalFuseTripped {
+		return RestoreResponse{}, ErrGlobalFuseTripped
+	}
+	if _, exists := e.tunnels[request.TunnelID]; exists {
+		return RestoreResponse{}, errors.New("tunnel already exists")
+	}
+	if _, exists := e.tokens[request.TokenHash]; exists {
+		return RestoreResponse{}, errors.New("tunnel token already exists")
+	}
+
+	item := newTunnelLocked(e, request.TunnelID, request.UserID, request.Protocol, request.TokenHash)
+	rebound := false
+	if err := e.bindPublicListenerOnPortLocked(item, request.OutboundPort); err != nil {
+		// The advertised port is gone (range reconfigured, or squatted). Take
+		// any free port so the tunnel keeps working; the caller persists it.
+		log.Printf("[relay] tunnel %s cannot reclaim public port %d (%v); rebinding", item.id, request.OutboundPort, err)
+		port, fallbackErr := e.bindPublicListenerLocked(item)
+		if fallbackErr != nil {
+			return RestoreResponse{}, fallbackErr
+		}
+		item.port = port
+		rebound = true
+	} else {
+		item.port = request.OutboundPort
+	}
+
+	e.registerTunnelLocked(item, usageSeed{
+		minutesLimit:       request.MonthlyMinutesLimit,
+		transferBytesLimit: request.MonthlyTransferBytesLimit,
+		minutesUsed:        request.MonthlyMinutesUsed,
+		transferBytesUsed:  request.MonthlyTransferBytesUsed,
+	})
+	log.Printf("[relay] restored %s tunnel %s on public port %d", item.protocol, item.id, item.port)
+	return RestoreResponse{OutboundPort: item.port, Rebound: rebound, PublicHost: e.cfg.PublicHost, ControlPort: e.cfg.ControlPort}, nil
+}
+
+func newTunnelLocked(engine *Engine, id, userID, protocol string, tokenHash [sha256.Size]byte) *tunnel {
+	return &tunnel{
+		engine:   engine,
+		id:       id,
+		userID:   userID,
+		protocol: protocol,
+		token:    tokenHash,
+		tcpLegs:  make(chan net.Conn, 64),
+		sessions: make(map[net.Conn]struct{}),
+	}
+}
+
+// usageSeed carries the owner's plan limits and current usage into the engine's
+// per-user accounting.
+type usageSeed struct {
+	minutesLimit       *int64
+	transferBytesLimit *int64
+	minutesUsed        int64
+	transferBytesUsed  int64
+}
+
+// registerTunnelLocked publishes a bound tunnel into the registry and starts
+// its public accept loop. The caller must hold e.mu and have bound a listener.
+func (e *Engine) registerTunnelLocked(item *tunnel, seed usageSeed) {
+	e.tunnels[item.id] = item
+	e.tokens[item.token] = item
+
+	usage := e.users[item.userID]
 	if usage == nil {
 		usage = &userUsage{
-			minutesUsed:  request.MonthlyMinutesUsed,
-			transferUsed: request.MonthlyTransferBytesUsed,
+			minutesUsed:  seed.minutesUsed,
+			transferUsed: seed.transferBytesUsed,
 			tunnels:      make(map[string]*tunnel),
 		}
-		e.users[request.UserID] = usage
+		e.users[item.userID] = usage
 	}
-	usage.monthlyMinutesLimit = copyLimit(request.MonthlyMinutesLimit)
-	usage.monthlyTransferBytesLimit = copyLimit(request.MonthlyTransferBytesLimit)
+	usage.monthlyMinutesLimit = copyLimit(seed.minutesLimit)
+	usage.monthlyTransferBytesLimit = copyLimit(seed.transferBytesLimit)
 	usage.tunnels[item.id] = item
 
 	if item.protocol == "tcp" {
@@ -325,8 +432,6 @@ func (e *Engine) Provision(request ProvisionRequest) (ProvisionResponse, error) 
 	} else {
 		go item.relayUDP()
 	}
-	log.Printf("[orchestrator] provisioned %s tunnel %s on public port %d", item.protocol, item.id, item.port)
-	return ProvisionResponse{OutboundPort: item.port, PublicHost: e.cfg.PublicHost, ControlPort: e.cfg.ControlPort}, nil
 }
 
 func (e *Engine) Deprovision(tunnelID string) error {
@@ -370,11 +475,11 @@ func (e *Engine) acceptControl(ln net.Listener) {
 func (e *Engine) registerConnection(conn net.Conn) {
 	item, role, err := e.authenticate(conn)
 	if err != nil {
-		_ = conn.Close()
+		rejectConnection(conn, role)
 		return
 	}
 	if item.isStopped() {
-		_ = conn.Close()
+		rejectConnection(conn, role)
 		return
 	}
 
@@ -406,6 +511,20 @@ func (e *Engine) registerConnection(conn net.Conn) {
 	}
 }
 
+// rejectConnection tells the client its handshake was refused before hanging
+// up, on a best-effort basis: a client that has already gone away is fine.
+//
+// Only the control connection carries signals. Writing to a data leg would
+// have the client forward the byte straight into the local service as payload,
+// so those are simply closed.
+func rejectConnection(conn net.Conn, role byte) {
+	if role == roleControl {
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, _ = conn.Write([]byte{signalAuthRejected})
+	}
+	_ = conn.Close()
+}
+
 func (e *Engine) authenticate(conn net.Conn) (*tunnel, byte, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{}) //nolint:errcheck
@@ -431,34 +550,47 @@ func (e *Engine) authenticate(conn net.Conn) (*tunnel, byte, error) {
 	e.mu.RLock()
 	item := e.tokens[hash]
 	e.mu.RUnlock()
+	// The role is returned even on failure so the caller knows whether this
+	// connection can carry a rejection signal back to the client.
 	if item == nil || subtle.ConstantTimeCompare(hash[:], item.token[:]) != 1 {
-		return nil, 0, errors.New("invalid token")
+		return nil, role[0], errors.New("invalid token")
 	}
 	return item, role[0], nil
 }
 
 func (e *Engine) bindPublicListenerLocked(item *tunnel) (int, error) {
 	for port := e.cfg.PortMin; port <= e.cfg.PortMax; port++ {
-		if _, used := e.usedPort[port]; used {
-			continue
+		if err := e.bindPublicListenerOnPortLocked(item, port); err == nil {
+			return port, nil
 		}
-		if item.protocol == "tcp" {
-			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-			if err != nil {
-				continue
-			}
-			item.tcpListener = ln
-		} else {
-			conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
-			if err != nil {
-				continue
-			}
-			item.udpListener = conn
-		}
-		e.usedPort[port] = struct{}{}
-		return port, nil
 	}
 	return 0, errors.New("no public ports available")
+}
+
+// bindPublicListenerOnPortLocked binds one specific public port. Restore uses
+// it to reclaim the port a tunnel already advertises to its users.
+func (e *Engine) bindPublicListenerOnPortLocked(item *tunnel, port int) error {
+	if port < e.cfg.PortMin || port > e.cfg.PortMax {
+		return fmt.Errorf("public port %d is outside the configured range", port)
+	}
+	if _, used := e.usedPort[port]; used {
+		return fmt.Errorf("public port %d is already in use", port)
+	}
+	if item.protocol == "tcp" {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			return err
+		}
+		item.tcpListener = ln
+	} else {
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
+		if err != nil {
+			return err
+		}
+		item.udpListener = conn
+	}
+	e.usedPort[port] = struct{}{}
+	return nil
 }
 
 func (t *tunnel) acceptTCP() {

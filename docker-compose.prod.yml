@@ -1,9 +1,8 @@
 services:
   nginx:
-    image: maciekpvp/mole-nginx:latest
+    image: maciekpvp/mole-nginx:${MOLE_IMAGE_TAG:-latest}
     container_name: mole-proxy
     restart: unless-stopped
-    user: root
     depends_on:
       mole-control-plane:
         condition: service_healthy
@@ -15,11 +14,64 @@ services:
       - "80:80"
       - "443:443"
       - "${MOLE_CONTROL_PORT:-9000}:9000/tcp" # Stream Proxied Control Port
-    # Configs are baked into the image via nginx/Dockerfile
+    environment:
+      # Drives server_name and the ssl_certificate paths in the :443 server that
+      # docker-entrypoint.d/40-mole-tls-sync.sh generates. Empty = HTTP only.
+      MOLE_DOMAIN: ${MOLE_DOMAIN:-}
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot:ro
+    # Configs are baked into the image via nginx/Dockerfile — changing them
+    # requires scripts/build-and-push.sh --only nginx, not an edit on this host.
     deploy:
       resources:
         limits:
           memory: 96M
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: mole-certbot
+    restart: unless-stopped
+    depends_on:
+      nginx:
+        condition: service_started
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    environment:
+      MOLE_DOMAIN: ${MOLE_DOMAIN:-}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-}
+      # Set to --staging while testing to avoid Let's Encrypt rate limits.
+      CERTBOT_EXTRA_ARGS: ${CERTBOT_EXTRA_ARGS:-}
+    # `certonly --keep-until-expiring` is idempotent: it exits 0 immediately when
+    # a valid certificate exists and is not near expiry. So one loop covers first
+    # issuance, renewal, and retrying after a failure. Backoff is 15 min on
+    # failure (4/hour stays under Let's Encrypt's 5 failed validations per hour)
+    # and 12 h on success. nginx notices new certificates on its own — see
+    # nginx/docker-entrypoint.d/40-mole-tls-sync.sh.
+    entrypoint: /bin/sh -c
+    command:
+      - |
+        if [ -z "$$MOLE_DOMAIN" ] || [ -z "$$CERTBOT_EMAIL" ]; then
+          echo "[certbot] MOLE_DOMAIN/CERTBOT_EMAIL unset - TLS disabled, idling."
+          sleep infinity
+        fi
+        while :; do
+          if certbot certonly --webroot -w /var/www/certbot \
+              -d "$$MOLE_DOMAIN" --email "$$CERTBOT_EMAIL" \
+              --agree-tos --no-eff-email --non-interactive \
+              --keep-until-expiring $$CERTBOT_EXTRA_ARGS; then
+            DELAY=43200
+          else
+            echo "[certbot] issuance/renewal failed - retrying in 15 minutes."
+            DELAY=900
+          fi
+          sleep "$$DELAY"
+        done
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
   postgres:
     image: postgres:17
@@ -44,7 +96,7 @@ services:
           memory: 256M
 
   mole-control-plane:
-    image: maciekpvp/mole-control-plane:latest
+    image: maciekpvp/mole-control-plane:${MOLE_IMAGE_TAG:-latest}
     container_name: mole-control-plane
     restart: unless-stopped
     depends_on:
@@ -70,19 +122,24 @@ services:
       MOLE_CONTROL_PORT: ${MOLE_CONTROL_PORT:-9000}
       MOLE_TUNNEL_PORT_MIN: ${MOLE_TUNNEL_PORT_MIN:-10000}
       MOLE_TUNNEL_PORT_MAX: ${MOLE_TUNNEL_PORT_MAX:-10100}
-      MOLE_PUBLIC_HOST: ${MOLE_PUBLIC_HOST:-localhost}
+      # Derived from MOLE_DOMAIN so one variable configures the whole deploy.
+      # Override explicitly only when the relay is on a different hostname.
+      MOLE_PUBLIC_HOST: ${MOLE_PUBLIC_HOST:-${MOLE_DOMAIN:-localhost}}
       MOLE_GLOBAL_TRANSFER_LIMIT_BYTES: ${MOLE_GLOBAL_TRANSFER_LIMIT_BYTES:-5497558138880}
       MOLE_SERVER_STATE_DIR: /var/lib/mole-server
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${MOLE_DOMAIN:-localhost}}
       RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-20}
       RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-50}
       AUTH_RATE_LIMIT_RPS: ${AUTH_RATE_LIMIT_RPS:-2}
       AUTH_RATE_LIMIT_BURST: ${AUTH_RATE_LIMIT_BURST:-5}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-http://localhost/api/v1/auth/google/callback}
-      GOOGLE_FRONTEND_URL: ${GOOGLE_FRONTEND_URL:-http://localhost}
+      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-https://${MOLE_DOMAIN:-localhost}/api/v1/auth/google/callback}
+      GOOGLE_FRONTEND_URL: ${GOOGLE_FRONTEND_URL:-https://${MOLE_DOMAIN:-localhost}}
       GOOGLE_COOKIE_SECURE: ${GOOGLE_COOKIE_SECURE:-true}
+      # Grants administrator permission to this account on startup, and on its
+      # next Google sign-in. Leave empty once the first admin exists.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:?STRIPE_SECRET_KEY must be set for production}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:?STRIPE_WEBHOOK_SECRET must be set for production}
       BLOCKED_IPS: ${BLOCKED_IPS:-}
@@ -98,7 +155,7 @@ services:
           memory: 192M
 
   mole-frontend:
-    image: maciekpvp/mole-frontend:latest
+    image: maciekpvp/mole-frontend:${MOLE_IMAGE_TAG:-latest}
     container_name: mole-frontend
     restart: unless-stopped
     networks:
@@ -121,3 +178,5 @@ networks:
 volumes:
   psql_data:
   mole_server_state:
+  letsencrypt:
+  certbot_webroot:

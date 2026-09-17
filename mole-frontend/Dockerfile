@@ -12,7 +12,12 @@ COPY . .
 # must be embedded in the static browser bundle. Never pass secret keys here.
 ARG VITE_STRIPE_PUBLISHABLE_KEY
 ENV VITE_STRIPE_PUBLISHABLE_KEY=${VITE_STRIPE_PUBLISHABLE_KEY}
-RUN test -n "$VITE_STRIPE_PUBLISHABLE_KEY" && npm run build
+RUN test -n "$VITE_STRIPE_PUBLISHABLE_KEY" || { \
+      echo "ERROR: the VITE_STRIPE_PUBLISHABLE_KEY build argument is required."; \
+      echo "Build via scripts/build-and-push.sh, or pass --build-arg VITE_STRIPE_PUBLISHABLE_KEY=pk_..."; \
+      exit 1; \
+    }
+RUN npm run build
 
 # ---- Serve stage ----
 FROM nginx:alpine
